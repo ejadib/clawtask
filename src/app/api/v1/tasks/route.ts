@@ -1,3 +1,4 @@
+import { assignmentTransaction, AssignmentConflict } from '@/lib/run-store';
 import { NextRequest } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, nextIssueId } from '@/db/db';
@@ -121,32 +122,41 @@ export async function POST(req: NextRequest) {
   }
   // --- end name resolution ---
 
+  if (body.status==='blocked') { body.assigneeId=null; body.assigneeType=null; }
+
   const id = uuidv4();
   const issueId = nextIssueId(db);
 
-  db.prepare(`
-    INSERT INTO tasks (id, issueId, title, description, priority, status, projectId, parentTaskId, assigneeId, assigneeType, startDate, endDate, createdAt, updatedAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-  `).run(
-    id,
-    issueId,
-    body.title,
-    body.description || '',
-    body.priority || 'medium',
-    body.status || 'backlog',
-    body.projectId || null,
-    body.parentTaskId || null,
-    body.assigneeId || null,
-    body.assigneeType || null,
-    body.startDate || null,
-    body.endDate || null
-  );
+  try {
+    assignmentTransaction(db,id,true,()=>{
+      db.prepare(`
+        INSERT INTO tasks (id, issueId, title, description, priority, status, projectId, parentTaskId, assigneeId, assigneeType, startDate, endDate, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      `).run(
+        id,
+        issueId,
+        body.title,
+        body.description || '',
+        body.priority || 'medium',
+        body.status || 'backlog',
+        body.projectId || null,
+        body.parentTaskId || null,
+        body.assigneeId || null,
+        body.assigneeType || null,
+        body.startDate || null,
+        body.endDate || null
+      );
 
-  // Tags
-  if (body.tags && Array.isArray(body.tags)) {
-    for (const tagId of body.tags) {
-      db.prepare('INSERT OR IGNORE INTO task_tags (taskId, tagId) VALUES (?, ?)').run(id, tagId);
-    }
+      // Tags
+      if (body.tags && Array.isArray(body.tags)) {
+        for (const tagId of body.tags) {
+          db.prepare('INSERT OR IGNORE INTO task_tags (taskId, tagId) VALUES (?, ?)').run(id, tagId);
+        }
+      }
+    });
+  } catch (error) {
+    if (error instanceof AssignmentConflict) return err('ASSIGNMENT_CONFLICT',error.message,409);
+    throw error;
   }
 
   const task = enrichTask(db, db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as any);

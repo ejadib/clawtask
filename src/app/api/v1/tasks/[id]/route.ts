@@ -1,3 +1,4 @@
+import { assignmentTransaction, AssignmentConflict } from '@/lib/run-store';
 import { NextRequest } from 'next/server';
 import { applyStatusRules, notifyTaskState } from '@/lib/task-status';
 import { getDb } from '@/db/db';
@@ -32,53 +33,60 @@ export async function PATCH(req: NextRequest, props: { params: Promise<{ id: str
   const updates: string[] = [];
   const values: unknown[] = [];
 
-  for (const field of allowed) {
-    if (field in body) {
-      updates.push(`${field} = ?`);
-      values.push(body[field] ?? null);
+  try {
+    assignmentTransaction(db,params.id,'assigneeId' in body || 'assigneeType' in body,()=>{
+      for (const field of allowed) {
+        if (field in body) {
+          updates.push(`${field} = ?`);
+          values.push(body[field] ?? null);
 
-      if (field === 'status' && body[field] !== task.status) {
-        logActivity(db, { taskId: params.id, actorId, actorType, verb: 'status_changed', meta: { from: task.status, to: body[field] } });
-      }
-      if (field === 'priority' && body[field] !== task.priority) {
-        logActivity(db, { taskId: params.id, actorId, actorType, verb: 'priority_changed', meta: { from: task.priority, to: body[field] } });
-      }
-      if (field === 'assigneeId' && body[field] !== task.assigneeId) {
-        if (body[field]) {
-          const assigneeType = body.assigneeType ?? task.assigneeType ?? 'human';
-          logActivity(db, { taskId: params.id, actorId, actorType, verb: 'assigned', meta: { assigneeId: body[field], assigneeType } });
-        } else {
-          logActivity(db, { taskId: params.id, actorId, actorType, verb: 'unassigned', meta: { prevAssigneeId: task.assigneeId, prevAssigneeType: task.assigneeType } });
+          if (field === 'status' && body[field] !== task.status) {
+            logActivity(db, { taskId: params.id, actorId, actorType, verb: 'status_changed', meta: { from: task.status, to: body[field] } });
+          }
+          if (field === 'priority' && body[field] !== task.priority) {
+            logActivity(db, { taskId: params.id, actorId, actorType, verb: 'priority_changed', meta: { from: task.priority, to: body[field] } });
+          }
+          if (field === 'assigneeId' && body[field] !== task.assigneeId) {
+            if (body[field]) {
+              const assigneeType = body.assigneeType ?? task.assigneeType ?? 'human';
+              logActivity(db, { taskId: params.id, actorId, actorType, verb: 'assigned', meta: { assigneeId: body[field], assigneeType } });
+            } else {
+              logActivity(db, { taskId: params.id, actorId, actorType, verb: 'unassigned', meta: { prevAssigneeId: task.assigneeId, prevAssigneeType: task.assigneeType } });
+            }
+          }
+          if (field === 'projectId' && body[field] !== task.projectId) {
+            logActivity(db, { taskId: params.id, actorId, actorType, verb: 'project_changed', meta: { from: task.projectId ?? null, to: body[field] ?? null } });
+          }
         }
       }
-      if (field === 'projectId' && body[field] !== task.projectId) {
-        logActivity(db, { taskId: params.id, actorId, actorType, verb: 'project_changed', meta: { from: task.projectId ?? null, to: body[field] ?? null } });
+
+      if (updates.length > 0) {
+        updates.push("updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')");
+        values.push(params.id);
+        db.prepare(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`).run(...values);
       }
-    }
-  }
 
-  if (updates.length > 0) {
-    updates.push("updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')");
-    values.push(params.id);
-    db.prepare(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-  }
-
-  // Tags
-  if (body.tags && Array.isArray(body.tags)) {
-    const prevTags = (db.prepare('SELECT tagId FROM task_tags WHERE taskId = ?').all(params.id) as any[]).map(r => r.tagId);
-    const nextTags: string[] = body.tags;
-    const added = nextTags.filter(t => !prevTags.includes(t));
-    const removed = prevTags.filter(t => !nextTags.includes(t));
-    db.prepare('DELETE FROM task_tags WHERE taskId = ?').run(params.id);
-    for (const tagId of nextTags) {
-      db.prepare('INSERT OR IGNORE INTO task_tags (taskId, tagId) VALUES (?, ?)').run(params.id, tagId);
-    }
-    for (const tagId of added) {
-      logActivity(db, { taskId: params.id, actorId, actorType, verb: 'tagged', meta: { tagId } });
-    }
-    for (const tagId of removed) {
-      logActivity(db, { taskId: params.id, actorId, actorType, verb: 'untagged', meta: { tagId } });
-    }
+      // Tags
+      if (body.tags && Array.isArray(body.tags)) {
+        const prevTags = (db.prepare('SELECT tagId FROM task_tags WHERE taskId = ?').all(params.id) as any[]).map(r => r.tagId);
+        const nextTags: string[] = body.tags;
+        const added = nextTags.filter(t => !prevTags.includes(t));
+        const removed = prevTags.filter(t => !nextTags.includes(t));
+        db.prepare('DELETE FROM task_tags WHERE taskId = ?').run(params.id);
+        for (const tagId of nextTags) {
+          db.prepare('INSERT OR IGNORE INTO task_tags (taskId, tagId) VALUES (?, ?)').run(params.id, tagId);
+        }
+        for (const tagId of added) {
+          logActivity(db, { taskId: params.id, actorId, actorType, verb: 'tagged', meta: { tagId } });
+        }
+        for (const tagId of removed) {
+          logActivity(db, { taskId: params.id, actorId, actorType, verb: 'untagged', meta: { tagId } });
+        }
+      }
+    });
+  } catch (error) {
+    if (error instanceof AssignmentConflict) return err('ASSIGNMENT_CONFLICT',error.message,409);
+    throw error;
   }
 
   const updated = enrichTask(db, db.prepare('SELECT * FROM tasks WHERE id = ?').get(params.id) as any);

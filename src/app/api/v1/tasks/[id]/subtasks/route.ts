@@ -1,3 +1,5 @@
+import { assignmentTransaction, AssignmentConflict } from '@/lib/run-store';
+import { notifyTaskState } from '@/lib/task-status';
 import { NextRequest } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, nextIssueId } from '@/db/db';
@@ -28,30 +30,40 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
   const body = await req.json();
   if (!body.title) return err('MISSING_TITLE', 'title is required', 400);
 
+  if ((body.status ?? parent.status)==='blocked') { body.assigneeId=null; body.assigneeType=null; }
+
   const id = uuidv4();
   const issueId = nextIssueId(db);
 
   // Inherit from parent unless overridden
-  db.prepare(`
-    INSERT INTO tasks (id, issueId, title, description, priority, status, parentTaskId, assigneeId, assigneeType, startDate, endDate, createdAt, updatedAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-  `).run(
-    id,
-    issueId,
-    body.title,
-    body.description || '',
-    body.priority ?? parent.priority,
-    body.status ?? parent.status,
-    params.id,
-    body.assigneeId !== undefined ? body.assigneeId : parent.assigneeId,
-    body.assigneeType !== undefined ? body.assigneeType : parent.assigneeType,
-    body.startDate || null,
-    body.endDate || null
-  );
+  try {
+    assignmentTransaction(db,id,true,()=>{
+      db.prepare(`
+        INSERT INTO tasks (id, issueId, title, description, priority, status, parentTaskId, assigneeId, assigneeType, startDate, endDate, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      `).run(
+        id,
+        issueId,
+        body.title,
+        body.description || '',
+        body.priority ?? parent.priority,
+        body.status ?? parent.status,
+        params.id,
+        body.assigneeId !== undefined ? body.assigneeId : parent.assigneeId,
+        body.assigneeType !== undefined ? body.assigneeType : parent.assigneeType,
+        body.startDate || null,
+        body.endDate || null
+      );
+    });
+  } catch (error) {
+    if (error instanceof AssignmentConflict) return err('ASSIGNMENT_CONFLICT',error.message,409);
+    throw error;
+  }
 
   const subtask = enrichTask(db, db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as any);
   logActivity(db, { taskId: id, actorId, actorType, verb: 'created', meta: { parentTaskId: params.id } });
   broadcastSse({ type: 'task.created', data: subtask });
 
+  await notifyTaskState(subtask);
   return ok(subtask, 201);
 }

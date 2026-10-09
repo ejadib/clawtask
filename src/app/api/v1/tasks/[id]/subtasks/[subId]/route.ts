@@ -1,3 +1,4 @@
+import { assignmentTransaction, AssignmentConflict } from '@/lib/run-store';
 import { NextRequest } from 'next/server';
 import { applyStatusRules, notifyTaskState } from '@/lib/task-status';
 import { getDb } from '@/db/db';
@@ -27,17 +28,24 @@ export async function PATCH(
   const updates: string[] = [];
   const values: unknown[] = [];
 
-  for (const field of allowed) {
-    if (field in body) {
-      updates.push(`${field} = ?`);
-      values.push(body[field] ?? null);
-    }
-  }
+  try {
+    assignmentTransaction(db,params.subId,'assigneeId' in body || 'assigneeType' in body,()=>{
+      for (const field of allowed) {
+        if (field in body) {
+          updates.push(`${field} = ?`);
+          values.push(body[field] ?? null);
+        }
+      }
 
-  if (updates.length > 0) {
-    updates.push("updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')");
-    values.push(params.subId);
-    db.prepare(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+      if (updates.length > 0) {
+        updates.push("updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')");
+        values.push(params.subId);
+        db.prepare(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+      }
+    });
+  } catch (error) {
+    if (error instanceof AssignmentConflict) return err('ASSIGNMENT_CONFLICT',error.message,409);
+    throw error;
   }
 
   const updated = enrichTask(db, db.prepare('SELECT * FROM tasks WHERE id = ?').get(params.subId) as any);

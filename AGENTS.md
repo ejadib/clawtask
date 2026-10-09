@@ -16,6 +16,7 @@ Run npm test, npm run typecheck, npm run build, and git diff --check. Tests must
 - Human comments and pending followups are saved atomically. Process followups in admission order.
 - Archive only done tasks after terminal run evidence, no pending work, and an idle gateway session. Task status remains done.
 - Restore and confirm the original session before reopening and dispatching a followup. Never create a replacement session in recovery.
+- Explicit assignment and pending dispatch admission share one SQLite transaction through run-store. Keep automatic polling's historical no-repeat guard. Never turn uncertain or outcome_required work into a new assignment attempt; preserve the original session and agent owner.
 - Blocked clears both assignee fields on every status route and does not dispatch. A blocked task session stays unarchived until the task is marked done.
 - Preserve stale-socket guards and one reconnect timer per connection.
 - Log IDs, events, and fixed failure codes, never credentials or prompt/comment contents.

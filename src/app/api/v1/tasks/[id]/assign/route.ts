@@ -1,3 +1,4 @@
+import { assignmentTransaction, AssignmentConflict } from '@/lib/run-store';
 import { NextRequest } from 'next/server';
 import { getDb } from '@/db/db';
 import { ok, err } from '@/lib/response';
@@ -19,10 +20,19 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
   const { actorId, actorType } = actor;
 
   const body = await req.json();
+  const current = db.prepare('SELECT status FROM tasks WHERE id=?').get(taskId) as any;
+  if (current.status==='blocked') return err('ASSIGNMENT_CONFLICT','Move blocked task to todo before assigning',409);
   if (!body.assigneeId || !body.assigneeType) return err('MISSING_FIELDS', 'assigneeId and assigneeType required', 400);
 
-  db.prepare("UPDATE tasks SET assigneeId = ?, assigneeType = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
-    .run(body.assigneeId, body.assigneeType, taskId);
+  try {
+    assignmentTransaction(db,taskId,true,()=>{
+      db.prepare("UPDATE tasks SET assigneeId = ?, assigneeType = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
+        .run(body.assigneeId, body.assigneeType, taskId);
+    });
+  } catch (error) {
+    if (error instanceof AssignmentConflict) return err('ASSIGNMENT_CONFLICT',error.message,409);
+    throw error;
+  }
 
   const updated = enrichTask(db, db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any);
   logActivity(db, { taskId, actorId, actorType, verb: 'assigned', meta: { assigneeId: body.assigneeId, assigneeType: body.assigneeType } });

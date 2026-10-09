@@ -4,6 +4,14 @@ This document records all major decisions made during the initial build of Clawt
 
 ---
 
+## 2026-10-09 — Explicit reassignment is durable admission
+
+Automatic polling excludes tasks with any dispatch history. Keep this guard: a blocked task must not repeat without an explicit assignment change. Assignment POST, task/subtask PATCH, and assigned task/subtask creation now commit assignment and pending admission together through run-store. Adapter notification only wakes the durable queue.
+
+A completed blocked run can resume when a human sets todo and reassigns the original agent. Use the latest non-empty human comment received since the last dispatch if it has not already been admitted. This carries the unblock override through the existing followup prompt rather than repeating the original block instruction. Keep the saved session key and ID. Repeated identical assignments and pending/active work do not create another dispatch.
+
+Recovery and outcome_required records require operator recovery; assignment returns 409 and rolls back instead of clearing them. Work and original sessions owned by another agent cannot be replaced. A busy agent can retain a pending assignment for another task and dispatch it only after the current owner releases. No schema migration or gateway changes are needed. See [local evidence](docs/blocked-reassignment-evidence.md).
+
 ## 2026-10-09 — Durable run ownership and session lifecycle
 
 Persist comment admission and dispatch identity before sending work. Initial dispatch and human followups use the same per-agent owner. Timeout and unknown acceptance retain that owner. Gateway dedupe is bounded and is not an indefinite exactly-once guarantee, so recovery waits for a saved run instead of replaying a submission.

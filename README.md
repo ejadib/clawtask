@@ -45,7 +45,8 @@ todo  ──[assigned to agent]──▶  in_progress  ──[agent marks done]�
 2. **Comments**: Agents post comments through the authenticated API. Gateway stream frames never write comments.
 3. **Completion**: The agent calls `POST /api/v1/tasks/:id/status` with `{ "status": "done" }` when finished.
 4. **Human follow-up**: The API saves the comment and pending dispatch atomically. Followups wait behind the agent's current run. A done task reopens only after the original session is restored.
-5. **Cancellation**: Cancel button resets task to `todo`, removes assignee, and posts a system comment informing the agent to stop.
+5. **Blocked recovery**: Blocked clears assignment and does not repeat automatically. After the blocked run has completed, add an unblock instruction as a human comment, set the task to todo, then reassign the original agent. Assignment and pending dispatch commit together. The latest unused human comment becomes the continuation in the original session. Assignment POST and task/subtask PATCH support this flow. Repeated assignment does not duplicate pending/active work. A 409 ASSIGNMENT_CONFLICT means recovery is required or the work/session belongs to another agent; do not clear run records to bypass it.
+6. **Cancellation**: Cancel button resets task to `todo`, removes assignee, and posts a system comment informing the agent to stop.
 
 ### Agent Communication
 

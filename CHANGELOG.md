@@ -12,11 +12,13 @@ All notable changes to this project are documented in this file.
 - Startup adds task_dispatches and task_sessions with CREATE TABLE IF NOT EXISTS. Existing task, comment, and activity records remain unchanged.
 
 ### Bug fixes
+- Explicit reassignment after a completed blocked run now saves a pending dispatch in the same transaction as assignment. Resume with the latest unused human comment and the original session. Duplicate assignments do not repeat pending or active work; recovery and owner conflicts return 409. Task/subtask creation and PATCH use the same admission helper.
 - Blocked clears both assignee fields through status POST, task PATCH and subtask PATCH. All status routes notify the same lifecycle owner.
 - Reconnect timer and socket callbacks now have one owner. Deliberate disconnect stays disconnected. Gateway URL replacement no longer mutates a live Map iterator.
 - Agent comments now use the authenticated API only. Gateway stream events no longer create or append task comments. Browser updates still use SSE.
 
 ### Tests
+- Added 29 isolated assignment/API regressions. Reproduced the blocked → human comment → todo → reassignment failure on both assignment routes before the fix; all 75 tests now pass. See docs/blocked-reassignment-evidence.md for local gates and limits.
 - Local real-gateway checks passed for initial completion/archive, same-session followup restore/archive, browser live delivery, blocked-to-done archive, and queue sequencing. Automated checks passed on Node 26.9.0; Node 20 CI remains a separate gate.
 - Added 32 isolated fake-gateway lifecycle tests and 4 transport tests, plus 6 API status/admission tests. Quality CI now runs npm test.
 - Added isolated SQLite regression tests for socket output, API comments, gateway responses, and the September 10 blocked-task fix.
