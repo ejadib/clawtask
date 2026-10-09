@@ -170,7 +170,7 @@ export function TaskDrawer({ taskId, onClose }: TaskDrawerProps) {
       await fetch(`/api/v1/tasks/${taskId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assigneeId, assigneeType }),
+        body: JSON.stringify({ assigneeId, assigneeType, humanRequested: true }),
       });
       reloadTask();
     } finally {
@@ -228,12 +228,12 @@ export function TaskDrawer({ taskId, onClose }: TaskDrawerProps) {
   });
 
   const handleStatusChange = async (status: string) => {
-    await apiPost(`/api/v1/tasks/${taskId}/status`, { status });
+    await apiPost(`/api/v1/tasks/${taskId}/status`, { status, humanRequested: true });
     reloadTask();
   };
 
   const handlePriorityChange = async (priority: string) => {
-    await apiPatch(`/api/v1/tasks/${taskId}`, { priority });
+    await apiPatch(`/api/v1/tasks/${taskId}`, { priority, humanRequested: true });
     reloadTask();
   };
 
@@ -245,6 +245,8 @@ export function TaskDrawer({ taskId, onClose }: TaskDrawerProps) {
       await apiPost(`/api/v1/tasks/${taskId}/comments`, {
         content: newComment.trim(),
         type: 'message',
+        // See IssuePageClient: only an explicit UI human action wakes agents.
+        humanRequested: true,
       });
       setNewComment('');
     } finally {

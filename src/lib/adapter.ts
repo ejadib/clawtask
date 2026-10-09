@@ -20,6 +20,9 @@ import path from 'path';
 import { getDb } from '@/db/db';
 import { broadcastSse } from './sse';
 import { v4 as uuidv4 } from 'uuid';
+import { logActivity } from './activity';
+import { enrichTask } from './tasks';
+import { parseAgentRunControl, stripAgentRunControl } from './agent-run-control';
 
 // ─── Device identity ──────────────────────────────────────────────────────────
 
@@ -158,9 +161,12 @@ interface AgentConnection {
   currentRunId: string | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   currentCommentId: string | null;
+  currentCommentIds: string[];
+  runOutput: string;
   pending: Map<string, PendingRequest>;
   handshakeDone: boolean;
   challengeNonce: string | null;
+  challengeTs: number | null;
   autoPairAttempted: boolean;
 }
 
@@ -169,6 +175,7 @@ const CLIENT_MODE = 'backend';
 const CLIENT_VERSION = 'clawtask';
 const ROLE = 'operator';
 const SCOPES = ['operator.admin'];
+const GATEWAY_PROTOCOL_VERSION = 4;
 
 // ─── Adapter service ──────────────────────────────────────────────────────────
 
@@ -284,8 +291,13 @@ class AdapterService {
           }
 
           if (frame.type === 'event' && (frame as GatewayEventFrame).event === 'connect.challenge') {
-            const nonce = (frame as any).payload?.nonce as string;
-            const signedAtMs = Date.now();
+            const challenge = (frame as any).payload;
+            const nonce = challenge?.nonce as string;
+            const signedAtMs = challenge?.ts as number;
+            if (!nonce || !Number.isFinite(signedAtMs)) {
+              finish(false, 'Invalid gateway challenge');
+              return;
+            }
             const v3Payload = buildDeviceAuthPayloadV3({
               deviceId: identity.deviceId,
               clientId: CLIENT_ID,
@@ -298,8 +310,8 @@ class AdapterService {
             });
 
             sendReq('connect', {
-              minProtocol: 3,
-              maxProtocol: 4,
+              minProtocol: GATEWAY_PROTOCOL_VERSION,
+              maxProtocol: GATEWAY_PROTOCOL_VERSION,
               client: { id: CLIENT_ID, version: CLIENT_VERSION, platform: process.platform, mode: CLIENT_MODE },
               role: ROLE,
               scopes: SCOPES,
@@ -344,9 +356,12 @@ class AdapterService {
       currentRunId: null,
       reconnectTimer: null,
       currentCommentId: null,
+      currentCommentIds: [],
+      runOutput: '',
       pending: new Map(),
       handshakeDone: false,
       challengeNonce: null,
+      challengeTs: null,
       autoPairAttempted: false,
     };
     this.connections.set(agent.id, conn);
@@ -365,6 +380,7 @@ class AdapterService {
     conn.status = 'connecting';
     conn.handshakeDone = false;
     conn.challengeNonce = null;
+    conn.challengeTs = null;
     conn.pending.clear();
 
     try {
@@ -424,7 +440,9 @@ class AdapterService {
 
   private handleEventFrame(conn: AgentConnection, frame: GatewayEventFrame) {
     if (frame.event === 'connect.challenge') {
-      conn.challengeNonce = (frame.payload as any)?.nonce ?? null;
+      const challenge = frame.payload as any;
+      conn.challengeNonce = challenge?.nonce ?? null;
+      conn.challengeTs = Number.isFinite(challenge?.ts) ? challenge.ts : null;
       this.doHandshake(conn);
       return;
     }
@@ -440,11 +458,9 @@ class AdapterService {
 
       const stream = typeof payload.stream === 'string' ? payload.stream : null;
 
-      // Any non-assistant stream event (tool call, job update) = boundary between thoughts
-      if (stream !== 'assistant') {
-        conn.currentCommentId = null;
-        return;
-      }
+      // Tool/job events may interleave with assistant streaming. They are not a
+      // comment boundary: the Gateway owns one visible agent comment per run.
+      if (stream !== 'assistant') return;
 
       const data = payload.data as any;
       const isDelta = typeof data?.delta === 'string';
@@ -459,7 +475,7 @@ class AdapterService {
 
       try {
         const db = getDb();
-        this.handleAgentOutput(conn, db, chunk, isDelta);
+        this.handleAgentOutput(conn, db, chunk);
       } catch {}
     }
   }
@@ -470,10 +486,12 @@ class AdapterService {
     const nonce = conn.challengeNonce;
     if (!nonce) { conn.ws?.close(); return; }
 
+    const signedAtMs = conn.challengeTs;
+    if (signedAtMs === null || !Number.isFinite(signedAtMs)) { conn.ws?.close(); return; }
+
     const identity = this.deviceIdentity;
     if (!identity) { conn.ws?.close(); return; }
 
-    const signedAtMs = Date.now();
     const v3Payload = buildDeviceAuthPayloadV3({
       deviceId: identity.deviceId,
       clientId: CLIENT_ID,
@@ -486,8 +504,8 @@ class AdapterService {
     });
 
     const connectParams = {
-      minProtocol: 3,
-      maxProtocol: 4,
+      minProtocol: GATEWAY_PROTOCOL_VERSION,
+      maxProtocol: GATEWAY_PROTOCOL_VERSION,
       client: { id: CLIENT_ID, version: CLIENT_VERSION, platform: process.platform, mode: CLIENT_MODE },
       role: ROLE,
       scopes: SCOPES,
@@ -570,8 +588,8 @@ class AdapterService {
               try {
                 // Connect with token only (no device) + pairing scope
                 await sendReq('connect', {
-                  minProtocol: 3,
-                  maxProtocol: 4,
+                  minProtocol: GATEWAY_PROTOCOL_VERSION,
+                  maxProtocol: GATEWAY_PROTOCOL_VERSION,
                   client: { id: CLIENT_ID, version: CLIENT_VERSION, platform: process.platform, mode: CLIENT_MODE },
                   role: ROLE,
                   scopes: [...SCOPES, 'operator.pairing'],
@@ -629,7 +647,9 @@ class AdapterService {
 
       conn.currentTaskId = nextTask.id;
       conn.currentCommentId = null;
+      conn.currentCommentIds = [];
       conn.currentRunId = null;
+      conn.runOutput = '';
 
       await this.dispatchTask(conn, nextTask);
     } catch {
@@ -641,34 +661,25 @@ class AdapterService {
   private async dispatchTask(conn: AgentConnection, task: any) {
     if (!conn.ws || conn.ws.readyState !== WebSocket.OPEN) return;
 
-    const db = getDb();
-    const agentRow = db.prepare('SELECT apiKey FROM agents WHERE id = ?').get(conn.agentId) as any;
-    const apiKey = agentRow?.apiKey ?? '';
-
     const slug = (task.issueId as string).toLowerCase();
     const message = `You have been assigned task ${task.issueId} in Clawtask.
 
-Your Clawtask API key: ${apiKey}
-Use it as Bearer token on ALL requests to ${CLAWTASK_SELF_URL}/api/v1/
-
-IMPORTANT: ALL Clawtask API calls MUST use exec/bash with curl or Python — never web_fetch. web_fetch cannot send Authorization headers and will post comments as the wrong user.
-
-Example comment post:
-  curl -s -X POST ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug}/comments \
-    -H "Authorization: Bearer ${apiKey}" \
-    -H "Content-Type: application/json" \
-    -d '{"content": "your comment here"}'
-
 Instructions:
-1. Set status to in_progress: POST ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug}/status with body { "status": "in_progress" }
-2. Fetch full task details: GET ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug}
-3. Do the work.
-4. Post SHORT comments as you go — one comment per action or finding, not one big block. Each comment should be 1-3 sentences max.
-5. When done, mark it: POST ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug}/status with body { "status": "done" }`;
+1. Fetch the task: GET ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug}
+2. Fetch EVERY existing instruction/comment before acting: GET ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug}/comments?order=asc
+3. Do the work. Task comments are authoritative instructions in addition to the task description.
+4. Write concise progress/final updates in your normal response. The verified Gateway adapter records them as agent comments.
+5. Do NOT call Clawtask mutation APIs and do not handle any Clawtask credentials.
+6. End your final response with exactly one control line:
+   CLAWTASK_FINAL: {"status":"done"}
+   To return the task to Todo and remove yourself instead, use:
+   CLAWTASK_FINAL: {"status":"todo","unassign":true}
+   Allowed statuses are done, todo, and blocked.`;
     const idempotencyKey = uuidv4();
     const sessionKey = `agent:${conn.openclawAgentId}:clawtask:${task.id}`;
 
     try {
+      this.markGatewayRunInProgress(conn, task.id);
       const accepted = await this.sendReq(conn, 'agent', {
         message,
         idempotencyKey,
@@ -689,63 +700,94 @@ Instructions:
         }, 360000);
       }
 
+      this.finishGatewayRun(conn, task.id);
       conn.currentTaskId = null;
       conn.currentRunId = null;
       conn.currentCommentId = null;
+      conn.currentCommentIds = [];
+      conn.runOutput = '';
       this.processNextTask(conn);
     } catch (err) {
       console.error('[adapter] dispatchTask failed', err);
       conn.currentTaskId = null;
       conn.currentRunId = null;
       conn.currentCommentId = null;
-      this.processNextTask(conn);
+      conn.currentCommentIds = [];
+      conn.runOutput = '';
     }
+  }
+
+  /** Gateway-authenticated lifecycle changes. No model-held API credential. */
+  private markGatewayRunInProgress(conn: AgentConnection, taskId: string) {
+    const db = getDb();
+    const current = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any;
+    if (!current || current.assigneeId !== conn.agentId || current.assigneeType !== 'agent' || current.status === 'in_progress') return;
+    db.prepare("UPDATE tasks SET status = 'in_progress', updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").run(taskId);
+    logActivity(db, { taskId, actorId: conn.agentId, actorType: 'agent', verb: 'status_changed', meta: { from: current.status, to: 'in_progress', source: 'gateway_run' } });
+    broadcastSse({ type: 'task.updated', data: enrichTask(db, db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any) });
+  }
+
+  private finishGatewayRun(conn: AgentConnection, taskId: string) {
+    const db = getDb();
+    const current = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any;
+    // A human cancellation/reassignment wins over a late agent run.
+    if (!current || current.assigneeId !== conn.agentId || current.assigneeType !== 'agent') return;
+
+    const control = parseAgentRunControl(conn.runOutput);
+    for (const commentId of conn.currentCommentIds) {
+      const row = db.prepare("SELECT content FROM comments WHERE id = ? AND taskId = ? AND authorId = ? AND authorType = 'agent'").get(commentId, taskId, conn.agentId) as { content: string } | undefined;
+      if (!row) continue;
+      const cleaned = stripAgentRunControl(row.content);
+      if (cleaned !== row.content) {
+        db.prepare("UPDATE comments SET content = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").run(cleaned, commentId);
+        const comment = db.prepare('SELECT * FROM comments WHERE id = ?').get(commentId) as any;
+        const author = db.prepare('SELECT id, openclawAgentId, displayName FROM agents WHERE id = ?').get(conn.agentId);
+        broadcastSse({ type: 'comment.updated', data: { ...comment, humanRequested: false, author } });
+      }
+    }
+
+    db.prepare("UPDATE tasks SET status = ?, assigneeId = ?, assigneeType = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
+      .run(control.status, control.unassign ? null : conn.agentId, control.unassign ? null : 'agent', taskId);
+    logActivity(db, {
+      taskId,
+      actorId: conn.agentId,
+      actorType: 'agent',
+      verb: 'status_changed',
+      meta: { from: current.status, to: control.status, unassigned: control.unassign, source: 'gateway_run' },
+    });
+    broadcastSse({ type: 'task.updated', data: enrichTask(db, db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any) });
   }
 
   // ─── Output streaming ─────────────────────────────────────────────────────
 
-  private handleAgentOutput(conn: AgentConnection, db: any, content: string, isDelta: boolean) {
+  private handleAgentOutput(conn: AgentConnection, db: any, content: string) {
     if (!conn.currentTaskId) return;
-    if (!content.trim()) return;
+    conn.runOutput = (conn.runOutput + content).slice(-65536);
+    if (!content.trim() && !conn.currentCommentId) return;
 
     const agentAuthor = db.prepare('SELECT id, openclawAgentId, displayName FROM agents WHERE id = ?').get(conn.agentId);
 
-    if (isDelta) {
-      // Accumulate delta into current comment
-      if (conn.currentCommentId) {
-        const existing = db.prepare('SELECT * FROM comments WHERE id = ?').get(conn.currentCommentId) as any;
-        if (existing) {
-          const newContent = existing.content + content;
-          db.prepare("UPDATE comments SET content = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
-            .run(newContent, conn.currentCommentId);
-          const updated = db.prepare('SELECT * FROM comments WHERE id = ?').get(conn.currentCommentId);
-          broadcastSse({ type: 'comment.updated', data: { ...updated, humanRequested: false, author: agentAuthor } });
-          // Seal comment on sentence boundary — next delta opens a fresh one
-          if (/[.!?]\s*$/.test(newContent)) {
-            conn.currentCommentId = null;
-          }
-          return;
-        }
+    if (conn.currentCommentId) {
+      const existing = db.prepare('SELECT * FROM comments WHERE id = ?').get(conn.currentCommentId) as any;
+      if (existing) {
+        const newContent = content.startsWith(existing.content) ? content : existing.content + content;
+        db.prepare("UPDATE comments SET content = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
+          .run(newContent, conn.currentCommentId);
+        const updated = db.prepare('SELECT * FROM comments WHERE id = ?').get(conn.currentCommentId);
+        broadcastSse({ type: 'comment.updated', data: { ...updated, humanRequested: false, author: agentAuthor } });
+        return;
       }
-      // No current comment — create one
-      const commentId = uuidv4();
-      db.prepare(`INSERT INTO comments (id, taskId, authorId, authorType, type, content, humanRequested, createdAt, updatedAt)
-        VALUES (?, ?, ?, 'agent', 'message', ?, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-        .run(commentId, conn.currentTaskId, conn.agentId, content);
-      conn.currentCommentId = commentId;
-      const comment = db.prepare('SELECT * FROM comments WHERE id = ?').get(commentId);
-      broadcastSse({ type: 'comment.added', data: { ...comment, humanRequested: false, author: agentAuthor } });
-    } else {
-      // Complete text message — each one is its own comment
       conn.currentCommentId = null;
-      const commentId = uuidv4();
-      db.prepare(`INSERT INTO comments (id, taskId, authorId, authorType, type, content, humanRequested, createdAt, updatedAt)
-        VALUES (?, ?, ?, 'agent', 'message', ?, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-        .run(commentId, conn.currentTaskId, conn.agentId, content.trim());
-      conn.currentCommentId = commentId;
-      const comment = db.prepare('SELECT * FROM comments WHERE id = ?').get(commentId);
-      broadcastSse({ type: 'comment.added', data: { ...comment, humanRequested: false, author: agentAuthor } });
     }
+
+    const commentId = uuidv4();
+    db.prepare(`INSERT INTO comments (id, taskId, authorId, authorType, type, content, humanRequested, createdAt, updatedAt)
+      VALUES (?, ?, ?, 'agent', 'message', ?, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+      .run(commentId, conn.currentTaskId, conn.agentId, content);
+    conn.currentCommentId = commentId;
+    conn.currentCommentIds.push(commentId);
+    const comment = db.prepare('SELECT * FROM comments WHERE id = ?').get(commentId);
+    broadcastSse({ type: 'comment.added', data: { ...comment, humanRequested: false, author: agentAuthor } });
   }
 
   // ─── Request primitive ────────────────────────────────────────────────────
@@ -819,9 +861,6 @@ Instructions:
     if (!conn?.ws || conn.ws.readyState !== WebSocket.OPEN || !conn.handshakeDone) return;
 
     const db = getDb();
-    const agentRow = db.prepare('SELECT apiKey FROM agents WHERE id = ?').get(conn.agentId) as any;
-    const apiKey = agentRow?.apiKey ?? '';
-
     const slug = (task.issueId as string).toLowerCase();
 
     // Auto-reopen if done — do this before checking currentTaskId so the agent gets context, not a fresh dispatch
@@ -841,20 +880,23 @@ Instructions:
       }
     }
 
+    const wasTrackingTask = conn.currentTaskId === task.id;
     // Ensure conn tracks this task so streamed output lands in a comment
     if (!conn.currentTaskId) {
       conn.currentTaskId = task.id;
       conn.currentCommentId = null;
+      conn.currentCommentIds = [];
       conn.currentRunId = null;
+      conn.runOutput = '';
     }
 
     const message = `A human left a comment on task ${task.issueId} that you are working on.
 
 Human comment: "${comment.content}"
 
-This is a follow-up to your existing work — do NOT restart or re-execute the task from scratch. Fetch the current task state from ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug} for full context, then respond directly to the comment by posting a reply via POST ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug}/comments. When you are done responding, mark the task done again via POST ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug}/status with body { "status": "done" }.
+This is a follow-up to existing work — do NOT restart or re-execute the task from scratch. Fetch the current task state from ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug} AND the complete comment history from ${CLAWTASK_SELF_URL}/api/v1/tasks/${slug}/comments?order=asc for full context.
 
-Your Clawtask API key: ${apiKey}\nUse it as Bearer token on ALL requests to ${CLAWTASK_SELF_URL}/api/v1/`;
+Write your response normally; the verified Gateway adapter records it as an agent comment. Do NOT call Clawtask mutation APIs or handle any credentials. End with exactly one line: CLAWTASK_FINAL: {"status":"done"}. Use {"status":"todo","unassign":true} only if the human explicitly requested it.`;
     const idempotencyKey = uuidv4();
     const sessionKey = `agent:${conn.openclawAgentId}:clawtask:${task.id}`;
 
@@ -867,7 +909,6 @@ Your Clawtask API key: ${apiKey}\nUse it as Bearer token on ALL requests to ${CL
       }, 15000) as any;
 
       const runId: string = accepted?.runId ?? idempotencyKey;
-      const prevTaskId = conn.currentTaskId;
       // Always update runId so the stream filter accepts chunks for this turn
       conn.currentTaskId = task.id;
       conn.currentRunId = runId;
@@ -877,10 +918,13 @@ Your Clawtask API key: ${apiKey}\nUse it as Bearer token on ALL requests to ${CL
         await this.sendReq(conn, 'agent.wait', { runId, timeoutMs: 300000 }, 360000);
       }
 
-      if (!prevTaskId) {
+      if (!wasTrackingTask) {
+        this.finishGatewayRun(conn, task.id);
         conn.currentTaskId = null;
         conn.currentRunId = null;
         conn.currentCommentId = null;
+        conn.currentCommentIds = [];
+        conn.runOutput = '';
         this.processNextTask(conn);
       }
     } catch {}

@@ -27,7 +27,7 @@ Browser  ──SSE──▶  Next.js App Router  ──SQLite──  ~/.clawtask
 ```
 
 - **UI**: Dark-theme React app inspired by Linear. Real-time updates via SSE.
-- **API**: REST endpoints under `/api/v1/`. Agents authenticate with a Bearer API key.
+- **API**: REST endpoints under `/api/v1/`. Human UI actions and external automations use explicit identity; assigned agent runs write back through the Gateway adapter.
 - **Adapter**: Singleton `AdapterService` maintains persistent WebSocket connections to OpenClaw per agent. Handles task dispatch, stream-to-comment, and task lifecycle.
 - **DB**: SQLite via `better-sqlite3`. WAL mode. Stored at `~/.clawtask/clawtask.db`.
 
@@ -42,8 +42,8 @@ todo  ──[assigned to agent]──▶  in_progress  ──[agent marks done]�
 ```
 
 1. **Assignment**: Assigning a task to a registered agent triggers `assignTaskToAgent` in the adapter. This dispatches a prompt to the agent's OpenClaw session.
-2. **Streaming**: The agent's output streams back via the gateway WS. Each agent turn (delimited by `stream: "job", state: "done"`) creates a new comment on the task.
-3. **Completion**: The agent calls `POST /api/v1/tasks/:id/status` with `{ "status": "done" }` when finished.
+2. **Streaming**: The agent's output streams back via the verified gateway WS. The adapter, which already knows the assigned agent and task run, persists that output as `agent` comments.
+3. **Completion**: The agent ends its response with a non-secret `CLAWTASK_FINAL` directive. The adapter applies the requested terminal state (`done`, `todo`, or `blocked`) for that verified run.
 4. **Human follow-up**: When a human posts a comment on a task, the adapter sends it to the agent as a follow-up (not a re-execution). If the task was `done`, it auto-reopens to `in_progress` before notifying the agent.
 5. **Cancellation**: Cancel button resets task to `todo`, removes assignee, and posts a system comment informing the agent to stop.
 
@@ -55,7 +55,7 @@ The adapter sends structured prompts to the agent over the OpenClaw gateway WS u
 agent:<openclawAgentId>:clawtask:<taskId>
 ```
 
-Agents authenticate to the Clawtask API using Bearer tokens issued at registration (shown once, hashed in DB).
+Agents do not receive or manage Clawtask API credentials during task runs. The adapter authenticates agent comments and lifecycle changes from the gateway connection and its run-to-task mapping.
 
 ### Stream-to-Comment Mapping
 
@@ -142,7 +142,7 @@ All responses follow the envelope:
 - **Single-user only**: One human, no authentication. Designed for private network / Tailscale deployment.
 - **Single OpenClaw instance**: The adapter connects to one gateway. Multi-gateway not supported.
 - **No horizontal scaling**: The SSE subscriber set and adapter singleton are in-process. Running multiple Next.js instances will break realtime and dispatch.
-- **Agent must use the API**: The adapter dispatches tasks via a prompt that includes the API key and endpoint. The agent is expected to call the Clawtask API itself to post comments and update status. Agents that don't follow instructions may leave tasks stuck in `in_progress`.
+- **Gateway write-back**: Agent prose is written back by the adapter only when it belongs to the verified assigned run. Direct unauthenticated API calls cannot become agent comments or status changes.
 - **No true agent interruption**: Cancel resets DB state and posts a stop comment, but cannot forcibly kill a running agent turn mid-stream. The agent will see the cancellation when it next polls task state.
 - **Next.js dev server singleton caveat**: The `AdapterService` is stored in `globalThis`. Hot-reloads in dev mode do not re-initialize it. If adapter code changes, restart the dev server manually.
 
