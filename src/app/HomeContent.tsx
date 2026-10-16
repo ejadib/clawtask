@@ -178,7 +178,7 @@ export function HomeContent() {
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: 'var(--color-base)' }}>
-      <Sidebar appName={config?.appName || 'Clawtask'} workspaceLogo={config?.workspaceLogo} />
+      <Sidebar appName={config?.appName || 'Clawtask'} workspaceLogo={config?.workspaceLogo} filters={filters} />
 
       <div className="flex-1 flex flex-col overflow-hidden" style={{ paddingBottom: isMobile ? 'calc(56px + env(safe-area-inset-bottom))' : 0 }}>
         <TopBar ref={searchRef}
