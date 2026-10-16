@@ -9,6 +9,7 @@ The reply form is sticky at the content region's bottom on tall surfaces and rem
 - New issue routes open at the title/description, not at the latest comment.
 - Jump to latest and successful own sends intentionally scroll only the content ref via `scrollTo`, never `scrollIntoView` on hidden ancestors.
 - New comment IDs follow only when the reader's last scroll was within 80px of the bottom. Initial fetch, comment edits, duplicate SSE events and activity-only updates do not initiate scrolling. Browser scroll anchoring may still compensate for content resizing above the reading position.
+- Responsive owner replacement resets follow intent when the DOM ref attaches, before any new-owner scroll event. A reader scrolling the replacement owner to the bottom immediately opts back into following; a resize alone does not inherit the prior owner's bottom intent.
 - Existing SSE subscription/deduplication and failed-send draft restoration remain in place. Reconnect uses the same comment-ID rule.
 
 ## Scope choice
