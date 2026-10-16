@@ -41,6 +41,7 @@ async function fixture(page: Page, description = markdown, count = 45) {
   await page.goto('/issues/test-001');
   await expect(page.getByRole('heading', { name: task.title })).toBeVisible();
   await expect(page.getByText('Synthetic comment ' + (count - 1), { exact: true })).toHaveCount(count ? 1 : 0);
+  await expect(page.locator('.detail-mobile-shell')).toHaveCount(page.viewportSize()!.width < 768 ? 1 : 0);
   return {
     async emit(type: string, data: unknown) { await page.evaluate(event => (window as any).emitTestEvent(event), { type, data }); },
     append() { const c = makeComment(comments.length); comments = [...comments, c]; return c; },
@@ -48,6 +49,15 @@ async function fixture(page: Page, description = markdown, count = 45) {
   };
 }
 const owner = (page: Page) => page.getByRole('region', { name: 'Issue content' });
+async function resizeIssue(page: Page, width: number, height: number) {
+  await page.setViewportSize({ width, height });
+  // Browser protocol completion does not imply React's resize effect has committed.
+  // Observe each branch transition before sending the next resize or scroll intent.
+  const mobile = page.locator('.detail-mobile-shell');
+  await expect(mobile).toHaveCount(width < 768 ? 1 : 0);
+  if (width < 768) await expect(mobile).toHaveCSS('height', height + 'px');
+}
+
 async function scroll(page: Page, top: number) {
   await owner(page).evaluate((node, value) => { node.scrollTop = value; node.dispatchEvent(new Event('scroll')); }, top);
 }
@@ -139,23 +149,23 @@ test('edit, tabs, breakpoint resize and short-height fallback remain reachable',
   await page.getByRole('button', { name: 'Activity', exact: true }).click();
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
   for (const width of [767, 768, 613]) {
-    await page.setViewportSize({ width, height: 749 });
+    await resizeIssue(page, width, 749);
     await expect(owner(page)).toHaveCount(1);
     await scroll(page, 1e8);
     await expect(page.getByPlaceholder('Reply')).toBeInViewport();
   }
-  await page.setViewportSize({ width: 768, height: 749 });
+  await resizeIssue(page, 768, 749);
   await scroll(page, 1e8);
-  await page.setViewportSize({ width: 613, height: 749 });
+  await resizeIssue(page, 613, 749);
   await expect(owner(page)).toHaveJSProperty('scrollTop', 0);
   await f.emit('comment.added', f.append());
   await expect(owner(page)).toHaveJSProperty('scrollTop', 0);
-  await page.setViewportSize({ width: 613, height: 320 });
+  await resizeIssue(page, 613, 320);
   await scroll(page, 1e8);
   expect(await page.locator('.detail-composer').evaluate(node => getComputedStyle(node).position)).toBe('static');
   await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeInViewport();
   await page.getByPlaceholder('Reply').fill('Short viewport draft');
-  await page.setViewportSize({ width: 613, height: 749 });
+  await resizeIssue(page, 613, 749);
   await expect(page.getByPlaceholder('Reply')).toHaveValue('Short viewport draft');
 });
 
@@ -215,7 +225,7 @@ for (const [from, to] of [[1440, 390], [390, 1440]]) {
     await page.setViewportSize({ width: from, height: 900 });
     const f = await fixture(page);
     await scroll(page, 1e8);
-    await page.setViewportSize({ width: to, height: 900 });
+    await resizeIssue(page, to, 900);
     await expect(owner(page)).toHaveJSProperty('scrollTop', 0);
     await scroll(page, 1e8);
     await atBottom(page);
