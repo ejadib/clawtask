@@ -238,11 +238,13 @@ interface NewAgentForm {
   displayName: string;
 }
 
-function AgentRow({ agent, onUpdated, onDeleted }: { agent: Agent; onUpdated: () => void; onDeleted: () => void }) {
+function AgentRow({ agent, onUpdated, onDeleted, onKeyRotated }: { agent: Agent; onUpdated: () => void; onDeleted: () => void; onKeyRotated: (key: string) => void }) {
   const [editing, setEditing] = useState(false);
   const [displayName, setDisplayName] = useState(agent.displayName);
   const [probing, setProbing] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
+  const [rotatingKey, setRotatingKey] = useState(false);
+  const [keyError, setKeyError] = useState<string | null>(null);
 
   // Keep local edit state in sync if the agent prop changes externally
   useEffect(() => { setDisplayName(agent.displayName); }, [agent.displayName]);
@@ -271,6 +273,21 @@ function AgentRow({ agent, onUpdated, onDeleted }: { agent: Agent; onUpdated: ()
     if (!confirm(`Delete agent ${agent.displayName}?`)) return;
     await apiDelete(`/api/v1/agents/${agent.id}`);
     onDeleted();
+  };
+
+  const handleRotateKey = async () => {
+    if (!confirm(`Rotate the API key for ${agent.displayName}? Existing agent credentials will stop working.`)) return;
+    setRotatingKey(true);
+    setKeyError(null);
+    try {
+      const result = await apiPost<{ apiKey: string }>(`/api/v1/agents/${agent.id}/rotate-key`, {});
+      onKeyRotated(result.apiKey);
+      onUpdated();
+    } catch (e: unknown) {
+      setKeyError(e instanceof Error && e.message ? e.message : 'Could not rotate API key');
+    } finally {
+      setRotatingKey(false);
+    }
   };
 
   const probeDot = {
@@ -304,6 +321,7 @@ function AgentRow({ agent, onUpdated, onDeleted }: { agent: Agent; onUpdated: ()
         {probeError && (
           <p className="mt-1 text-xs text-red-600 break-all" role="alert">Probe: {probeError}</p>
         )}
+        {keyError && <p className="mt-1 text-xs text-red-600 break-all" role="alert">Key: {keyError}</p>}
       </td>
       <td className="py-3 px-4">
         <div className="flex items-center gap-2">
@@ -318,6 +336,9 @@ function AgentRow({ agent, onUpdated, onDeleted }: { agent: Agent; onUpdated: ()
 
               <Button size="sm" variant="ghost" onClick={handleProbe} disabled={probing}>
                 {probing ? '...' : 'Probe'}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={handleRotateKey} disabled={rotatingKey}>
+                {rotatingKey ? 'Rotating...' : 'Rotate key'}
               </Button>
               <Button size="sm" variant="danger" onClick={handleDelete}>Delete</Button>
             </>
@@ -397,6 +418,7 @@ function AgentsSettings() {
                 agent={agent}
                 onUpdated={reload}
                 onDeleted={reload}
+                onKeyRotated={setNewKey}
               />
             ))}
             {(!agents || agents.length === 0) && (
