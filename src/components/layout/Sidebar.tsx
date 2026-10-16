@@ -172,6 +172,11 @@ function SidebarInner({ appName, workspaceLogo, filters }: SidebarProps) {
           <span className="section-label">Projects</span>
         </div>
         <div className="px-2 mb-4">
+          {countError && (
+            <div role="alert" className="px-2.5 py-1 text-xs" style={{ color: 'var(--color-base-600)' }}>
+              Counts unavailable. <button type="button" className="underline" onClick={reloadCounts}>Retry counts</button>
+            </div>
+          )}
           <ul className="space-y-px">
             {(projects || []).map((project) => {
               const isActive = pathname === '/' && projectId === project.id;
