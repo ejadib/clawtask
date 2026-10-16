@@ -1,6 +1,9 @@
 import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { Dispatch } from './run-store';
+import { validateTaskRuntime, type TaskRuntime } from './task-runtime';
+type RuntimePreparation = (conn: any, row: Dispatch, session: any, settings: TaskRuntime) => Promise<any>;
+class RuntimePreparationFailed extends Error {}
 
 interface Transport {
   agentId: string; openclawAgentId: string;
@@ -16,7 +19,8 @@ export class RunControl {
   private locks = new Map<string, Promise<unknown>>();
   constructor(private db: Database.Database, private request: Request,
     private available: (conn: any) => boolean, private message: (task: any, comment: any, conn: any) => string,
-    private reopened: (taskId: string) => void = () => {}) {}
+    private reopened: (taskId: string) => void = () => {},
+    private runtime: RuntimePreparation = async () => { throw new Error('runtime_transport_unavailable'); }) {}
 
   private log(event: string, row: {taskId: string; runId?: string | null}, code?: string) {
     console.info('[adapter]', JSON.stringify({event,taskId:row.taskId,runId:row.runId ?? undefined,code}));
@@ -115,31 +119,42 @@ export class RunControl {
   }
 
   private async prepare(conn: Transport, row: Dispatch) {
-    return this.serialized(row.taskId,async()=>{
+    return this.serialized<false | { session: any; settings: TaskRuntime; revision: number }>(row.taskId,async()=>{
       this.remember(row);
       const task=this.db.prepare('SELECT * FROM tasks WHERE id=?').get(row.taskId) as any;
       if (!task || task.assigneeId!==conn.agentId || task.assigneeType!=='agent' || !['todo','in_progress','done'].includes(task.status)) return false;
       const stored=this.session(row.taskId);
       // A followup must target the original session. Never create its replacement.
-      const session=await this.describe(conn,row,!!row.commentId || !!stored.sessionId);
+      let session=await this.describe(conn,row,!!row.commentId || !!stored.sessionId);
+      const settings: TaskRuntime = { modelOverride: task.modelOverride ?? null, thinkingOverride: task.thinkingOverride ?? null };
+      if (validateTaskRuntime(settings)) throw new RuntimePreparationFailed();
       if (session?.hasActiveRun) throw new Error('session_active');
       if (session?.archived) {
         const patched=await this.request(conn,'sessions.patch',{key:row.sessionKey,agentId:conn.openclawAgentId,expectedSessionId:session.sessionId,archived:false},360000);
         if (patched?.ok!==true || patched.entry?.sessionId!==session.sessionId || patched.entry?.archivedAt!==undefined) throw new Error('restore_unconfirmed');
         const restored=await this.describe(conn,row,true);
         if (restored.archived || restored.hasActiveRun) throw new Error('restore_unconfirmed');
+        session=restored;
         this.db.prepare('UPDATE task_sessions SET cleanupAttempts=0,cleanupPending=0,errorCode=NULL WHERE taskId=?').run(row.taskId);
         this.log('restored',row);
       }
       if (!this.available(conn)) throw new Error('transport_lost');
+      try {
+        const prepared = await this.runtime(conn,row,session,settings);
+        if (!prepared || typeof prepared.sessionId !== 'string' || (session && prepared.sessionId!==session.sessionId)) throw new Error('runtime_identity_changed');
+        session=prepared;
+        this.db.prepare('UPDATE task_sessions SET sessionId=? WHERE taskId=? AND (sessionId IS NULL OR sessionId=?)').run(session.sessionId,row.taskId,session.sessionId);
+      } catch { throw new RuntimePreparationFailed(); }
+      if (!this.available(conn)) throw new RuntimePreparationFailed();
       // Status or assignee can change while describe/restore is in flight.
       const fresh=this.db.prepare('SELECT * FROM tasks WHERE id=?').get(row.taskId) as any;
       if (fresh?.assigneeId!==conn.agentId || fresh.assigneeType!=='agent' || !['todo','in_progress','done'].includes(fresh.status)) return false;
+      if (fresh.runtimeRevision !== task.runtimeRevision) throw new RuntimePreparationFailed();
       if (row.commentId && fresh.status==='done') {
         this.db.prepare("UPDATE tasks SET status='in_progress',updatedAt=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='done'").run(row.taskId);
         this.reopened(row.taskId);
       }
-      return true;
+      return { session, settings, revision: task.runtimeRevision };
     });
   }
 
@@ -169,21 +184,29 @@ export class RunControl {
         row=row ?? this.claimNext(conn);
         if (!row) break;
         if (row.state==='pending') {
-          try { if (!await this.prepare(conn,row)) break; }
-          catch {
-            this.db.prepare("UPDATE task_dispatches SET errorCode='restore_or_identity_failed' WHERE id=?").run(row.id);
-            this.log('followup_retained',row,'restore_or_identity_failed');
+          let prepared;
+          try { prepared=await this.prepare(conn,row); if (!prepared) break; }
+          catch (error) {
+            const code=error instanceof RuntimePreparationFailed ? 'runtime_preparation_failed' : 'restore_or_identity_failed';
+            this.db.prepare('UPDATE task_dispatches SET errorCode=? WHERE id=?').run(code,row.id);
+            this.log('followup_retained',row,code);
             break;
           }
           if (!this.available(conn)) break;
-          // Persist before submission. Unknown acceptance is an owned recovery case.
-          this.db.prepare("UPDATE task_dispatches SET state='submitting',runId=id,errorCode=NULL WHERE id=? AND state='pending'").run(row.id);
-          row={...row,state:'submitting',runId:row.id};
+          // Freeze settings at submission; edits while preparing invalidate this attempt.
+          // This synchronous transaction shares admission's SQLite write boundary.
+          const frozen=JSON.stringify(prepared.settings);
+          const revision=prepared.session.lifecycleRevision ?? null;
+          const claimed=this.db.transaction(()=>this.db.prepare(
+            "UPDATE task_dispatches SET state='submitting',runId=id,errorCode=NULL,runtimeSettings=?,runtimeSessionRevision=? WHERE id=? AND state='pending' AND EXISTS(SELECT 1 FROM tasks WHERE id=task_dispatches.taskId AND runtimeRevision=? AND assigneeId=? AND assigneeType='agent' AND status IN ('todo','in_progress','done'))"
+          ).run(frozen,revision,row!.id,prepared.revision,conn.agentId).changes)();
+          if (claimed!==1) break;
+          row={...row,state:'submitting',runId:row.id,runtimeSettings:frozen,runtimeSessionRevision:revision};
           conn.currentTaskId=row.taskId;conn.currentRunId=row.runId;
           try {
             const task=this.db.prepare('SELECT * FROM tasks WHERE id=?').get(row.taskId);
             const comment=row.commentId ? this.db.prepare('SELECT * FROM comments WHERE id=?').get(row.commentId) : null;
-            const accepted=await this.request(conn,'agent',{message:this.message(task,comment,conn),idempotencyKey:row.id,sessionKey:row.sessionKey,agentId:conn.openclawAgentId,...this.session(row.taskId)?.sessionId ? {expectedExistingSessionId:this.session(row.taskId).sessionId} : {}},15000);
+            const accepted=await this.request(conn,'agent',{message:this.message(task,comment,conn),idempotencyKey:row.id,sessionKey:row.sessionKey,agentId:conn.openclawAgentId,...row.runtimeSessionRevision ? {expectedExistingSessionLifecycleRevision:row.runtimeSessionRevision} : {},...this.session(row.taskId)?.sessionId ? {expectedExistingSessionId:this.session(row.taskId).sessionId} : {}},15000);
             if (typeof accepted?.runId!=='string' || accepted.runId!==row.id) throw new Error('invalid_acceptance');
             this.db.prepare("UPDATE task_dispatches SET state='running',runId=? WHERE id=? AND runId=?").run(accepted.runId,row.id,row.id);
             row={...row,state:'running'};this.log('accepted',row);

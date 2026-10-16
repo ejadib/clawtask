@@ -5,12 +5,14 @@ All notable changes to this project are documented in this file.
 ## Unreleased
 
 ### Features
+- Tasks independently inherit agent model/thinking defaults, with optional persisted API and desktop/mobile overrides and explicit Default clearing. Runtime preparation verifies the exact session before dispatch using non-admin authority; unsupported settings retain pending work instead of submitting. See docs/task-runtime.md for Gateway requirements and active-run edit semantics.
 - Sidebar projects show issue counts matching active status, priority, assignee, search and tag filters, with live task-event refresh.
 - All Issues includes every status by default. Status selections are explicit, including Backlog and Archived. Issue detail has Previous/Next buttons and unmodified left/right arrow shortcuts in the same grouped order, using the saved grouping preference.
 - Durable per-agent run ownership and FIFO human followups. Unknown acceptance, timeout and connection loss retain work instead of repeating it.
 - Done task sessions archive only after terminal run observation and idle gateway checks. Followups restore the same session before dispatch. Task responses expose dispatch and cleanup recovery state.
 
 ### Database
+- Additive nullable task runtime preferences, revision and dispatch snapshots preserve historical rows and run ownership.
 - Startup adds task_dispatches and task_sessions with CREATE TABLE IF NOT EXISTS. Existing task, comment, and activity records remain unchanged.
 
 ### Bug fixes
