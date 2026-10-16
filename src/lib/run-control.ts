@@ -49,12 +49,21 @@ export class RunControl {
     if (!result || !('session' in result)) throw new Error('invalid_describe');
     const session=result.session;
     if (session===null && !requireExisting) return null;
-    if (!session || typeof session.sessionId!=='string' || typeof session.hasActiveRun!=='boolean' || typeof session.archived!=='boolean') throw new Error('missing_session_or_contract');
+    if (!session || typeof session.sessionId!=='string' || typeof session.archived!=='boolean') throw new Error('missing_session_or_contract');
+    // Recent Gateways expose an aggregate session `status` instead of the
+    // legacy boolean. Treat only active lifecycle states as busy so a terminal
+    // session can be safely resumed by the task adapter.
+    if (typeof session.hasActiveRun!=='boolean' && typeof session.status!=='string') {
+      throw new Error('missing_session_or_contract');
+    }
+    const hasActiveRun = typeof session.hasActiveRun==='boolean'
+      ? session.hasActiveRun
+      : ['queued','running'].includes(session.status);
     const stored=this.session(row.taskId);
     if (!stored?.sessionId && !allowIdentityBinding && this.db.prepare("SELECT 1 FROM task_dispatches WHERE taskId=? AND state!='pending' LIMIT 1").get(row.taskId)) throw new Error('original_identity_unobserved');
     if (stored?.sessionId && stored.sessionId!==session.sessionId) throw new Error('session_identity_changed');
     this.db.prepare('UPDATE task_sessions SET sessionId=? WHERE taskId=? AND (sessionId IS NULL OR sessionId=?)').run(session.sessionId,row.taskId,session.sessionId);
-    return session;
+    return {...session,hasActiveRun};
   }
   private pending(taskId: string) {
     return !!this.db.prepare("SELECT 1 FROM task_dispatches WHERE taskId=? AND state IN ('pending','submitting','running','recovery') LIMIT 1").get(taskId);
