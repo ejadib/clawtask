@@ -60,7 +60,17 @@ for (const [width, height] of [[1440, 900], [613, 749], [390, 844], [767, 749], 
       await page.setViewportSize({ width, height });
       await fixture(page, description);
       const heading = page.getByRole('heading', { name: 'Synthetic scroll regression' });
-      // This assertion reproduces the old initial ancestor-scroll bug before looking for the new owner.
+      // Wait for initial layout/smooth scrolling to settle without using a new-only selector.
+      await heading.evaluate(node => new Promise<void>(resolve => {
+        let previous = Number.NaN, stableFrames = 0;
+        const frame = () => {
+          const top = node.getBoundingClientRect().top;
+          stableFrames = top === previous ? stableFrames + 1 : 0; previous = top;
+          if (stableFrames >= 5) resolve(); else requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      }));
+      // Old-compatible geometry assertion proves clipping, not missing new markup.
       expect((await heading.boundingBox())!.y).toBeGreaterThanOrEqual(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await expect(owner(page)).toHaveJSProperty('scrollTop', 0);
@@ -199,3 +209,19 @@ test('visual viewport keyboard resize switches composer to flow without losing d
   await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeInViewport();
   await expect(page.getByPlaceholder('Reply')).toHaveValue('Keyboard draft');
 });
+
+for (const [from, to] of [[1440, 390], [390, 1440]]) {
+  test(from + ' to ' + to + ': new-owner scroll before incoming append keeps following', async ({ page }) => {
+    await page.setViewportSize({ width: from, height: 900 });
+    const f = await fixture(page);
+    await scroll(page, 1e8);
+    await page.setViewportSize({ width: to, height: 900 });
+    await expect(owner(page)).toHaveJSProperty('scrollTop', 0);
+    await scroll(page, 1e8);
+    await atBottom(page);
+    const comment = { ...f.append(), content: Array.from({ length: 15 }, (_, i) => 'Responsive append paragraph ' + i).join('\n\n') };
+    await f.emit('comment.added', comment);
+    await expect(page.getByText('Responsive append paragraph 14', { exact: true })).toHaveCount(1);
+    await atBottom(page);
+  });
+}

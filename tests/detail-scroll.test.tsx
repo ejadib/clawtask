@@ -9,17 +9,24 @@ afterEach(cleanup);
 function setup() {
   const calls: number[] = [];
   let controls: ReturnType<typeof useDetailScroll>;
-  function Harness({ comments }: { comments: { id: string }[] }) {
+  let comments: { id: string }[] = [];
+  let ownerKey = 0;
+  function Harness({ comments, ownerKey }: { comments: { id: string }[]; ownerKey: number }) {
     controls = useDetailScroll(comments);
-    return <div ref={controls.contentRef} onScroll={controls.onScroll} />;
+    return <div key={ownerKey} ref={controls.contentRef} onScroll={controls.onScroll} />;
   }
-  const ui = render(<Harness comments={[]} />);
-  const node = ui.container.firstChild as HTMLDivElement;
-  Object.defineProperties(node, { scrollHeight: { value: 2000 }, clientHeight: { value: 500 } });
-  node.scrollTo = options => { calls.push((options as ScrollToOptions).top!); };
+  const ui = render(<Harness comments={comments} ownerKey={ownerKey} />);
+  let node: HTMLDivElement;
+  function bindNode() {
+    node = ui.container.firstChild as HTMLDivElement;
+    Object.defineProperties(node, { scrollHeight: { value: 2000 }, clientHeight: { value: 500 } });
+    node.scrollTo = options => { calls.push((options as ScrollToOptions).top!); };
+  }
+  bindNode();
   return {
     calls,
-    update(ids: string[]) { ui.rerender(<Harness comments={ids.map(id => ({ id }))} />); },
+    update(ids: string[]) { comments = ids.map(id => ({ id })); ui.rerender(<Harness comments={comments} ownerKey={ownerKey} />); },
+    swapOwner() { ownerKey++; ui.rerender(<Harness comments={comments} ownerKey={ownerKey} />); bindNode(); },
     position(top: number) { node.scrollTop = top; fireEvent.scroll(node); },
     jump() { act(() => controls!.jumpToLatest()); },
     sent() { controls!.followOwnSend.current = true; },
@@ -45,3 +52,14 @@ test('successful own send follows even while reading, and consumes intent once',
   const h = setup(); h.update(['a']); h.position(0); h.sent(); h.update(['a', 'mine']);
   assert.deepEqual(h.calls, [2000]); h.update(['a', 'mine']); assert.deepEqual(h.calls, [2000]);
 });
+
+for (const direction of ['desktop to mobile', 'mobile to desktop']) {
+  test(direction + ': fresh new-owner bottom intent survives the next append', () => {
+    const h = setup(); h.update(['a']); h.position(1500); h.swapOwner();
+    h.position(1500); h.update(['a', 'b']); assert.deepEqual(h.calls, [2000]);
+  });
+  test(direction + ': replacement owner does not inherit the old bottom intent', () => {
+    const h = setup(); h.update(['a']); h.position(1500); h.swapOwner();
+    h.update(['a', 'b']); assert.deepEqual(h.calls, []);
+  });
+}
