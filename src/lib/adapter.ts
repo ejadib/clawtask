@@ -20,7 +20,7 @@ import path from 'path';
 import { getDb } from '@/db/db';
 import { v4 as uuidv4 } from 'uuid';
 import { RunControl } from './run-control';
-import { prepareTaskRuntime } from './runtime-control';
+import { prepareTaskRuntime, type CreationHandoff } from './runtime-control';
 import type { TaskRuntime } from './task-runtime';
 import { admitFollowup } from './run-store';
 import { logActivity } from './activity';
@@ -619,7 +619,7 @@ export class AdapterService {
         if (human) logActivity(db,{taskId,actorId:human.id,actorType:'human',verb:'status_changed',meta:{from:'done',to:'in_progress'}});
         broadcastSse({type:'task.updated',data:enrichTask(db,db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId) as any)});
       },
-      (conn,row,session,settings) => this.prepareRuntime(conn,row,session,settings));
+      (conn,row,session,settings,creation) => this.prepareRuntime(conn,row,session,settings,creation));
     return this.runControl;
   }
 
@@ -662,7 +662,7 @@ Instructions:
   }
 
   /** One bounded connection per preparation, deliberately never paired/upgraded/retried. */
-  private async prepareRuntime(conn: AgentConnection, row: any, session: any, settings: TaskRuntime) {
+  private async prepareRuntime(conn: AgentConnection, row: any, session: any, settings: TaskRuntime, creation?: CreationHandoff) {
     const generation = conn.generation;
     const identity = this.deviceIdentity;
     if (!identity) throw new Error('runtime_identity_unavailable');
@@ -722,7 +722,7 @@ Instructions:
     socket.on('close', () => { rejectHello(new Error('runtime_transport_lost')); rejectPending(); });
     try {
       await hello;
-      return await prepareTaskRuntime(request, { sessionKey: row.sessionKey, agentId: conn.openclawAgentId, dispatchId: row.id, session }, settings);
+      return await prepareTaskRuntime(request, { sessionKey: row.sessionKey, agentId: conn.openclawAgentId, dispatchId: row.id, session, creation }, settings);
     } finally { clearTimeout(timer); rejectPending(); socket.close(); }
   }
 

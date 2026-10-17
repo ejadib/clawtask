@@ -2,23 +2,30 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { RunControl } from '../src/lib/run-control';
 import { prepareTaskRuntime } from '../src/lib/runtime-control';
 import { admitFollowup } from '../src/lib/run-store';
 
 let db: Database.Database;
+let root: string;
+const reopen=()=>{db.close();db=new Database(path.join(root,'test.db'));};
 const key='agent:test:clawtask:t';
 beforeEach(()=>{
- db=new Database(':memory:');db.exec(fs.readFileSync('src/db/schema.sql','utf8'));
+ root=fs.mkdtempSync(path.join(os.tmpdir(),'clawtask-runtime-identity-'));
+ db=new Database(path.join(root,'test.db'));db.exec(fs.readFileSync('src/db/schema.sql','utf8'));
  db.prepare("INSERT INTO agents(id,openclawAgentId,displayName,apiKeyHash) VALUES('a','test','Test','unused')").run();
  db.prepare("INSERT INTO tasks(id,issueId,title,status,assigneeId,assigneeType) VALUES('t','TEST-001','Test','todo','a','agent')").run();
 });
-afterEach(()=>db.close());
+afterEach(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
 function fixture(initial=true){
  const calls:any[]=[];let session:any=initial?null:{key,sessionId:'original',lifecycleRevision:'r1',archived:false,hasActiveRun:false,modelProvider:'old',model:'previous',modelOverrideSource:'user',thinkingLevel:'low',thinkingDefault:'medium',agentRuntime:{id:'openclaw'}};
  let hook:((method:string,p:any)=>any)|undefined;let available=true;
  const narrow=async(method:string,p:any)=>{
-  calls.push({method,p,narrow:true});const result=await hook?.(method,p);if(result!==undefined)return result;
+  calls.push({method,p,narrow:true});
+  if(method==='sessions.create')assert.equal((db.prepare('SELECT creationPending FROM task_sessions').get() as any).creationPending,1);
+  const result=await hook?.(method,p);if(result!==undefined)return result;
   if(method==='sessions.create'){assert.equal(session,null);assert.equal(p.message,undefined);assert.equal(p.task,undefined);session={key,sessionId:'created',lifecycleRevision:'r1',archived:false,hasActiveRun:false};return {ok:true,key,sessionId:session.sessionId,runStarted:false};}
   if(method==='sessions.describe')return {session:session?{...session}:null};
   if(method==='sessions.patch'){
@@ -36,7 +43,7 @@ function fixture(initial=true){
   if(method==='agent.wait')return {runId:p.runId,status:'timeout'};
   throw Error(method);
  };
- const make=()=>new RunControl(db,admin,()=>available,()=> 'synthetic',()=>{},(_conn,row,s,settings)=>prepareTaskRuntime(narrow,{sessionKey:row.sessionKey,agentId:'test',dispatchId:row.id,session:s},settings));
+ const make=()=>new RunControl(db,admin,()=>available,()=> 'synthetic',()=>{},(_conn,row,s,settings,creation)=>prepareTaskRuntime(narrow,{sessionKey:row.sessionKey,agentId:'test',dispatchId:row.id,session:s,creation},settings));
  return {conn,calls,control:make(),make,narrow,get session(){return session;},setSession:(s:any)=>{session=s;},setHook:(fn:typeof hook)=>{hook=fn;},setAvailable:(value:boolean)=>{available=value;}};
 }
 const sends=(f:ReturnType<typeof fixture>)=>f.calls.filter(c=>c.method==='agent');
@@ -111,6 +118,56 @@ test('missing original followup never creates replacement session',async()=>{
 for(const acknowledgment of [{ok:true,key,sessionId:'created',runStarted:true},{ok:true,key,sessionId:'created'},{ok:false,key,sessionId:'created',runStarted:false}])test('unverified no-execution creation cannot reach patch or submit: '+JSON.stringify(acknowledgment),async()=>{
  const f=fixture();f.setHook(method=>method==='sessions.create'?acknowledgment:undefined);
  await f.control.pump(f.conn);assert.equal(sends(f).length,0);assert.equal(f.calls.filter(c=>c.method==='sessions.patch').length,0);assert.equal(row().state,'pending');
+});
+for(const boundary of ['describe','patch','readback'])test('verified creation identity survives '+boundary+' failure and restart replacement',async()=>{
+ const f=fixture();let describes=0;
+ f.setHook(method=>{
+  if(method==='sessions.describe' && ++describes===(boundary==='readback'?2:1) && boundary!=='patch')throw Error('lost response');
+  if(method==='sessions.patch' && boundary==='patch')throw Error('denied');
+ });
+ await f.control.pump(f.conn);const pending={...row()};
+ assert.equal(sends(f).length,0);assert.equal(pending.state,'pending');
+ assert.equal((db.prepare('SELECT * FROM task_sessions').get() as any).sessionId,'created');
+ const saved=db.prepare('SELECT * FROM task_sessions').get();
+ const original={...f.session};f.setHook(undefined);f.setSession({...original,sessionId:'replacement'});reopen();
+ await f.make().pump({...f.conn,currentTaskId:null,currentRunId:null});
+ assert.equal(sends(f).length,0);assert.equal((db.prepare('SELECT * FROM task_sessions').get() as any).sessionId,'created');
+ assert.deepEqual({...row(),errorCode:null},{...pending,errorCode:null});
+ assert.deepEqual(db.prepare('SELECT * FROM task_sessions').get(),saved);
+ assert.equal(f.calls.filter(c=>c.method==='sessions.create').length,1);
+ f.setSession(original);await f.make().pump({...f.conn,currentTaskId:null,currentRunId:null});
+ assert.equal(sends(f).length,1);assert.equal(sends(f)[0].p.expectedExistingSessionId,'created');
+});
+for(const boundary of ['lost','partial','empty-id'])test('unconfirmed creation '+boundary+' cannot adopt a replacement after restart',async()=>{
+ const f=fixture();f.setHook(method=>{if(method==='sessions.create'){
+  f.setSession({key,sessionId:'created',archived:false,hasActiveRun:false});
+  if(boundary==='lost')throw Error('lost acknowledgment');
+  return {ok:true,key,sessionId:boundary==='empty-id'?'':'created',...(boundary==='empty-id'?{runStarted:false}:{})};
+ }});
+ await f.control.pump(f.conn);const pending={...row()};assert.equal(sends(f).length,0);
+ assert.equal((db.prepare('SELECT * FROM task_sessions').get() as any).sessionId,null);
+ const saved=db.prepare('SELECT * FROM task_sessions').get();
+ assert.equal((saved as any).creationPending,1);
+ f.setHook(undefined);f.setSession({key,sessionId:'replacement',archived:false,hasActiveRun:false});reopen();
+ await f.make().pump({...f.conn,currentTaskId:null,currentRunId:null});
+ assert.equal(sends(f).length,0);assert.deepEqual(db.prepare('SELECT * FROM task_sessions').get(),saved);
+ assert.deepEqual({...row(),errorCode:null},{...pending,errorCode:null});
+ assert.equal(f.calls.filter(c=>c.method==='sessions.create').length,1);
+});
+for(const boundary of ['intent','binding'])test('creation '+boundary+' database failure stops all later Gateway work and retains uncertainty',async()=>{
+ const f=fixture();db.exec("CREATE TRIGGER fail_handoff BEFORE UPDATE OF "+(boundary==='intent'?'creationPending':'sessionId')+" ON task_sessions BEGIN SELECT RAISE(ABORT,'synthetic'); END");
+ await f.control.pump(f.conn);assert.equal(sends(f).length,0);assert.equal(row().state,'pending');assert.equal(row().attempts,0);
+ assert.equal(f.calls.filter(c=>c.method==='sessions.create').length,boundary==='intent'?0:1);
+ assert.equal(f.calls.filter(c=>c.narrow&&c.method==='sessions.describe').length,0);
+ assert.equal((db.prepare('SELECT * FROM task_sessions').get() as any).sessionId,null);
+ if(boundary==='binding'){
+  db.exec('DROP TRIGGER fail_handoff');reopen();f.setSession({key,sessionId:'replacement',archived:false,hasActiveRun:false});
+  await f.make().pump({...f.conn,currentTaskId:null,currentRunId:null});assert.equal(sends(f).length,0);
+  assert.equal((db.prepare('SELECT * FROM task_sessions').get() as any).creationPending,1);
+ }
+});
+test('initial creation without durable handoff fails before sending create',async()=>{
+ let called=false;await assert.rejects(()=>prepareTaskRuntime(async()=>{called=true;},{sessionKey:key,agentId:'test',dispatchId:'d',session:null},{modelOverride:null,thinkingOverride:null}),/handoff_missing/);assert.equal(called,false);
 });
 test('no configured runtime preparation callback cannot accidentally bypass enforcement',async()=>{
  const control=new RunControl(db,async()=>({session:{sessionId:'original',archived:false,hasActiveRun:false}}),()=>true,()=> 'synthetic');

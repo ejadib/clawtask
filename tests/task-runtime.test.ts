@@ -76,12 +76,13 @@ test('startup migrates historical task rows idempotently without changing their 
   try {
     fs.mkdirSync(path.join(root,'.clawtask'));
     const file=path.join(root,'.clawtask','clawtask.db');const old=new Database(file);
-    old.exec(fs.readFileSync('src/db/schema.sql','utf8').replace('  modelOverride TEXT,\n','').replace('  thinkingOverride TEXT,\n','').replace('  runtimeRevision INTEGER NOT NULL DEFAULT 0,\n','').replace('  runtimeSettings TEXT,\n','').replace('  runtimeSessionRevision TEXT,\n',''));
+    old.exec(fs.readFileSync('src/db/schema.sql','utf8').replace('  modelOverride TEXT,\n','').replace('  thinkingOverride TEXT,\n','').replace('  runtimeRevision INTEGER NOT NULL DEFAULT 0,\n','').replace('  runtimeSettings TEXT,\n','').replace('  runtimeSessionRevision TEXT,\n','').replace('  creationPending INTEGER NOT NULL DEFAULT 0,\n',''));
     old.prepare("INSERT INTO tasks(id,issueId,title) VALUES('old','OLD-001','Preserve me')").run();
     old.prepare("INSERT INTO task_dispatches(id,taskId,agentId,sessionKey,runId,state,attempts) VALUES('held','old','a','agent:test:clawtask:old','held','recovery',4)").run();
+    old.prepare("INSERT INTO task_sessions(taskId,agentId,sessionKey,sessionId,cleanupAttempts,errorCode) VALUES('old','a','agent:test:clawtask:old','original',2,'preserved')").run();
     old.close();
     for(let n=0;n<2;n++) {
-      const result=spawnSync(process.execPath,['--import','tsx','-e',"const {getDb}=require('./src/db/db.ts');const db=getDb();const row=db.prepare('SELECT * FROM tasks').get();if(row.title!=='Preserve me'||row.modelOverride!==null||row.thinkingOverride!==null||row.runtimeRevision!==0)process.exit(1);const held=db.prepare('SELECT * FROM task_dispatches').get();if(held.state!=='recovery'||held.runId!=='held'||held.attempts!==4||held.runtimeSettings!==null)process.exit(2);db.close();"],{cwd:process.cwd(),env:{...process.env,HOME:root},encoding:'utf8'});
+      const result=spawnSync(process.execPath,['--import','tsx','-e',"const {getDb}=require('./src/db/db.ts');const db=getDb();const row=db.prepare('SELECT * FROM tasks').get();if(row.title!=='Preserve me'||row.modelOverride!==null||row.thinkingOverride!==null||row.runtimeRevision!==0)process.exit(1);const held=db.prepare('SELECT * FROM task_dispatches').get();if(held.state!=='recovery'||held.runId!=='held'||held.attempts!==4||held.runtimeSettings!==null)process.exit(2);const s=db.prepare('SELECT * FROM task_sessions').get();if(s.sessionId!=='original'||s.creationPending!==0||s.cleanupAttempts!==2||s.errorCode!=='preserved')process.exit(3);db.close();"],{cwd:process.cwd(),env:{...process.env,HOME:root},encoding:'utf8'});
       assert.equal(result.status,0,result.stderr);
     }
   } finally {fs.rmSync(root,{recursive:true,force:true});}

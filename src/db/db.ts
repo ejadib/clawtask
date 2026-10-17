@@ -187,6 +187,10 @@ function runMigrations(db: Database.Database) {
     if (!dispatchCols.includes(column)) db.exec(`ALTER TABLE task_dispatches ADD COLUMN ${column} TEXT`);
   }
 
+  // Unknown session creation cannot be retried/adopted after restart. Historical rows are unchanged.
+  const sessionCols = (db.pragma('table_info(task_sessions)') as Array<{ name: string }>).map(c => c.name);
+  if (!sessionCols.includes('creationPending')) db.exec('ALTER TABLE task_sessions ADD COLUMN creationPending INTEGER NOT NULL DEFAULT 0');
+
   // Backfill: any agent with empty apiKey gets a fresh key+hash pair (sync both)
   const stale = db
     .prepare(`SELECT id FROM agents WHERE apiKey = '' OR apiKey IS NULL`)

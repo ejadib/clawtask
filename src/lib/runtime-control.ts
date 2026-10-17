@@ -1,7 +1,8 @@
 import { validateTaskRuntime, type TaskRuntime } from './task-runtime';
 
 type Request = (method: string, params: any) => Promise<any>;
-export interface RuntimeTarget { sessionKey: string; agentId: string; dispatchId: string; session: any }
+export interface CreationHandoff { begin: () => void; bind: (sessionId: string) => void }
+export interface RuntimeTarget { sessionKey: string; agentId: string; dispatchId: string; session: any; creation?: CreationHandoff }
 
 function idle(session: any, key: string, id?: string) {
   if (!session || session.key !== key || typeof session.sessionId !== 'string' || !session.sessionId ||
@@ -15,9 +16,14 @@ export async function prepareTaskRuntime(request: Request, target: RuntimeTarget
   const { sessionKey: key, agentId } = target;
   let session = target.session;
   if (!session) {
-    // No prompt/title task: creation must not start any model work. Stable identity for retries.
+    // Commit intent before sending: a lost/partial acknowledgment must never permit adoption.
+    if (!target.creation) throw new Error('runtime_creation_handoff_missing');
+    target.creation.begin();
+    // No prompt/title task: creation must not start any model work.
     const created = await request('sessions.create', { key, agentId, idempotencyKey: 'clawtask-runtime:' + target.dispatchId });
-    if (created?.ok !== true || created.runStarted !== false || created.key !== key || typeof created.sessionId !== 'string') throw new Error('runtime_create_unconfirmed');
+    if (created?.ok !== true || created.runStarted !== false || created.key !== key || typeof created.sessionId !== 'string' || !created.sessionId.trim()) throw new Error('runtime_create_unconfirmed');
+    // Synchronous durable handoff BEFORE any subsequent await or fallible verification.
+    target.creation.bind(created.sessionId);
     session = (await request('sessions.describe', { key, agentId }))?.session;
     idle(session, key, created.sessionId);
   } else {

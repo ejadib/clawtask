@@ -40,7 +40,7 @@ reject=false;await page.getByRole('button',{name:'Create Issue',exact:true}).cli
 assert.equal(task.modelOverride,'test/model');assert.equal(task.thinkingOverride,'high');passed++;
 if(width<768)await page.getByTitle('Show properties').click();
 await page.getByRole('button',{name:'Edit runtime'}).click();await page.getByLabel('Model mode').selectOption('default');await page.getByLabel('Thinking override').selectOption('');
-reject=true;await page.getByRole('button',{name:'Save runtime'}).click();await page.getByRole('alert').waitFor();assert.equal(task.modelOverride,'test/model');passed++;
+reject=true;await page.getByRole('button',{name:'Save runtime'}).click();await page.getByRole('alert').filter({hasText:'Synthetic mutation rejected'}).waitFor();assert.equal(task.modelOverride,'test/model');passed++;
 reject=false;await page.getByRole('button',{name:'Save runtime'}).click();await page.getByRole('button',{name:'Edit runtime'}).waitFor();assert.deepEqual(writes.at(-1),{modelOverride:null,thinkingOverride:null});passed++;
 await page.reload();if(width<768)await page.getByTitle('Show properties').click();await page.getByText('Model: Default · Thinking: Default',{exact:true}).waitFor();assert.deepEqual(errors,[]);passed++;
 await page.close();

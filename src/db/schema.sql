@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS task_sessions (
   agentId TEXT NOT NULL,
   sessionKey TEXT NOT NULL,
   sessionId TEXT,
+  creationPending INTEGER NOT NULL DEFAULT 0,
   cleanupPending INTEGER NOT NULL DEFAULT 0,
   cleanupAttempts INTEGER NOT NULL DEFAULT 0,
   errorCode TEXT

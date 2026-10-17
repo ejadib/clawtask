@@ -2,7 +2,8 @@ import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { Dispatch } from './run-store';
 import { validateTaskRuntime, type TaskRuntime } from './task-runtime';
-type RuntimePreparation = (conn: any, row: Dispatch, session: any, settings: TaskRuntime) => Promise<any>;
+import type { CreationHandoff } from './runtime-control';
+type RuntimePreparation = (conn: any, row: Dispatch, session: any, settings: TaskRuntime, creation: CreationHandoff) => Promise<any>;
 class RuntimePreparationFailed extends Error {}
 
 interface Transport {
@@ -41,6 +42,7 @@ export class RunControl {
     this.db.prepare('INSERT OR IGNORE INTO task_sessions(taskId,agentId,sessionKey) VALUES(?,?,?)').run(row.taskId,row.agentId,row.sessionKey);
   }
   private async describe(conn: Transport, row: any, requireExisting: boolean, allowIdentityBinding = false) {
+    if (this.session(row.taskId)?.creationPending) throw new RuntimePreparationFailed();
     // `key` is sufficient to identify the session on current Gateways. Older
     // Gateways may require the redundant agent id, so retry only when the
     // portable request is rejected.
@@ -140,10 +142,23 @@ export class RunControl {
       }
       if (!this.available(conn)) throw new Error('transport_lost');
       try {
-        const prepared = await this.runtime(conn,row,session,settings);
+        const creation: CreationHandoff = {
+          begin: () => {
+            const changed=this.db.prepare("UPDATE task_sessions SET creationPending=1 WHERE taskId=? AND agentId=? AND sessionKey=? AND sessionId IS NULL AND creationPending=0 AND EXISTS(SELECT 1 FROM task_dispatches WHERE id=? AND state='pending')")
+              .run(row.taskId,row.agentId,row.sessionKey,row.id).changes;
+            if (changed!==1) throw new Error('runtime_creation_conflict');
+          },
+          bind: id => {
+            const changed=this.db.prepare("UPDATE task_sessions SET sessionId=?,creationPending=0 WHERE taskId=? AND agentId=? AND sessionKey=? AND sessionId IS NULL AND creationPending=1 AND EXISTS(SELECT 1 FROM task_dispatches WHERE id=? AND state='pending')")
+              .run(id,row.taskId,row.agentId,row.sessionKey,row.id).changes;
+            if (changed!==1) throw new Error('runtime_creation_bind_failed');
+          },
+        };
+        const prepared = await this.runtime(conn,row,session,settings,creation);
         if (!prepared || typeof prepared.sessionId !== 'string' || (session && prepared.sessionId!==session.sessionId)) throw new Error('runtime_identity_changed');
         session=prepared;
-        this.db.prepare('UPDATE task_sessions SET sessionId=? WHERE taskId=? AND (sessionId IS NULL OR sessionId=?)').run(session.sessionId,row.taskId,session.sessionId);
+        const bound=this.session(row.taskId);
+        if (bound?.creationPending || bound?.sessionId!==session.sessionId) throw new Error('runtime_identity_unbound');
       } catch { throw new RuntimePreparationFailed(); }
       if (!this.available(conn)) throw new RuntimePreparationFailed();
       // Status or assignee can change while describe/restore is in flight.

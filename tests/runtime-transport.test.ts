@@ -32,7 +32,13 @@ async function fixture(mode='ok',scope='global'){
     granted=[...p.scopes];
     if(mode==='reject'){socket.send(JSON.stringify({type:'res',id:frame.id,ok:false,error:{message:'pairing required'}}));return;}
     result={type:'hello-ok',protocol:4,auth:{role:'operator',scopes:mode==='admin-response'?['operator.admin']:mode==='missing-write'?[]:granted}};
+   }else if(frame.method==='sessions.create'){
+    assert.equal(mode,'dispatch-create');assert.equal(session,null);assert.equal(p.message,undefined);assert.equal(p.task,undefined);
+    assert.equal((globalThis.__clawtask_db!.prepare('SELECT creationPending FROM task_sessions').get() as any).creationPending,1);
+    session={key,sessionId:'original',archived:false,hasActiveRun:false,agentRuntime:{id:'openclaw'}};
+    result={ok:true,key,sessionId:'original',runStarted:false};
    }else if(frame.method==='sessions.describe'){
+    if(mode==='dispatch-create' && globalThis.__clawtask_db)assert.equal((globalThis.__clawtask_db.prepare('SELECT sessionId FROM task_sessions').get() as any).sessionId,'original');
     if(mode==='close'){socket.close();return;}
     result={session};
    }else if(frame.method==='sessions.patch'){
@@ -49,15 +55,16 @@ async function fixture(mode='ok',scope='global'){
  });
  try{
   const operation=adapter.prepareRuntime(conn,{id:'dispatch',sessionKey:key},session,{modelOverride:'test/model',thinkingOverride:'high'});
-  if(mode==='ok' || mode==='dispatch')assert.equal((await operation).model,'model');else await assert.rejects(operation);
+  if(mode==='ok' || mode==='dispatch' || mode==='dispatch-create')assert.equal((await operation).model,'model');else await assert.rejects(operation);
   assert.equal(globals.model,'global/original');
   assert.equal(calls.some(c=>c.method.startsWith('device.')||c.method==='agent'),false);
   if(['admin-response','missing-write','reject','invalid-challenge'].includes(mode))assert.equal(calls.filter(c=>c.method==='sessions.patch').length,0);
-  if(mode==='dispatch'){
+  if(mode==='dispatch' || mode==='dispatch-create'){
    const db=new Database(':memory:');db.exec(fs.readFileSync('src/db/schema.sql','utf8'));
    db.prepare("INSERT INTO agents(id,openclawAgentId,displayName,apiKeyHash) VALUES('a','test','Test','unused')").run();
    db.prepare("INSERT INTO tasks(id,issueId,title,status,assigneeId,assigneeType,modelOverride,thinkingOverride) VALUES('synthetic','TEST-001','Synthetic','todo','a','agent','test/model','high')").run();
    globalThis.__clawtask_db=db;conn.ws={readyState:1};conn.currentTaskId=null;conn.currentRunId=null;
+   if(mode==='dispatch-create')session=null;
    adapter.buildMessage=()=> 'synthetic';let submissions=0;
    adapter.sendReq=async(_:any,method:string,p:any)=>{
     if(method==='sessions.describe')return {session};
@@ -81,4 +88,5 @@ for(const scope of ['session','agent','global'])test('signed non-admin runtime a
  const calls=await fixture('ok',scope);assert.equal(calls.filter(c=>c.method==='sessions.patch').length,1);assert.equal(calls.filter(c=>c.method==='connect').length,1);
 });
 test('adapter admission uses actual narrowed socket before its single admin run submission',async()=>{await fixture('dispatch');});
+test('adapter persists verified initial creation over signed socket before describe and submission',async()=>{await fixture('dispatch-create');});
 for(const mode of ['admin-response','missing-write','reject','invalid-challenge','close','stale'])test('runtime transport fail closed: '+mode,async()=>{await fixture(mode);});
