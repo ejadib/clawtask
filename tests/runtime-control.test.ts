@@ -19,19 +19,22 @@ beforeEach(()=>{
  db.prepare("INSERT INTO tasks(id,issueId,title,status,assigneeId,assigneeType) VALUES('t','TEST-001','Test','todo','a','agent')").run();
 });
 afterEach(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
-function fixture(initial=true){
- const calls:any[]=[];let session:any=initial?null:{key,sessionId:'original',lifecycleRevision:'r1',archived:false,hasActiveRun:false,modelProvider:'old',model:'previous',modelOverrideSource:'user',thinkingLevel:'low',thinkingDefault:'medium',agentRuntime:{id:'openclaw'}};
- let hook:((method:string,p:any)=>any)|undefined;let available=true;
+function fixture(initial=true,omitPatchThinking=false,statusOnly=false){
+ const calls:any[]=[];let session:any=initial?null:{key,sessionId:'original',lifecycleRevision:'r1',archived:false,hasActiveRun:false,modelProvider:'old',model:'previous',modelOverrideSource:'user',thinkingLevel:'low',thinkingDefault:'medium',thinkingLevels:[{id:'high'},{id:'medium'}],agentRuntime:{id:'openclaw'}};
+ let hook:((method:string,p:any)=>any)|undefined;let available=true;let submitFails=false;
+ let patchReceipt:((r:any,s:any)=>void)=()=>{};
+ if(statusOnly&&session){delete session.hasActiveRun;session.status='done';}
  const narrow=async(method:string,p:any)=>{
   calls.push({method,p,narrow:true});
   if(method==='sessions.create')assert.equal((db.prepare('SELECT creationPending FROM task_sessions').get() as any).creationPending,1);
   const result=await hook?.(method,p);if(result!==undefined)return result;
-  if(method==='sessions.create'){assert.equal(session,null);assert.equal(p.message,undefined);assert.equal(p.task,undefined);session={key,sessionId:'created',lifecycleRevision:'r1',archived:false,hasActiveRun:false};return {ok:true,key,sessionId:session.sessionId,runStarted:false};}
+  if(method==='sessions.create'){assert.equal(session,null);assert.equal(p.message,undefined);assert.equal(p.task,undefined);session={key,sessionId:'created',lifecycleRevision:'r1',archived:false,...statusOnly?{status:'done'}:{hasActiveRun:false}};return {ok:true,key,sessionId:session.sessionId,runStarted:false};}
   if(method==='sessions.describe')return {session:session?{...session}:null};
   if(method==='sessions.patch'){
    assert.equal(p.expectedSessionId,session.sessionId);assert.equal(p.expectedLifecycleRevision,session.lifecycleRevision);
-   session={...session,modelProvider:p.model?.split('/')[0]??'default',model:p.model?.slice(p.model.indexOf('/')+1)??'agent-model',modelOverrideSource:p.model===null?null:'user',thinkingLevel:p.thinkingLevel??undefined,thinkingDefault:'medium',agentRuntime:{id:'openclaw'}};
-   return {ok:true,key,entry:{sessionId:session.sessionId,modelOverrideSource:p.model===null?'default':'user',thinkingLevel:session.thinkingLevel},resolved:{modelProvider:session.modelProvider,model:session.model,agentRuntime:session.agentRuntime,thinkingLevel:session.thinkingLevel??'medium',thinkingLevels:[{id:'high'},{id:'medium'}]}};
+   session={...session,modelProvider:p.model?.split('/')[0]??'default',model:p.model?.slice(p.model.indexOf('/')+1)??'agent-model',modelOverrideSource:p.model===null?null:'user',thinkingLevel:p.thinkingLevel??undefined,thinkingDefault:'medium',thinkingLevels:[{id:'high'},{id:'medium'}],agentRuntime:{id:'openclaw'}};
+   const receipt:any={ok:true,key,entry:{sessionId:session.sessionId,lifecycleRevision:session.lifecycleRevision,modelOverrideSource:p.model===null?'default':'user',thinkingLevel:session.thinkingLevel},resolved:{modelProvider:session.modelProvider,model:session.model,agentRuntime:session.agentRuntime,...omitPatchThinking?{}:{thinkingLevel:session.thinkingLevel??'medium',thinkingLevels:[{id:'high'},{id:'medium'}]}}};
+   patchReceipt(receipt,session);return receipt;
   }
   throw Error(method);
  };
@@ -39,12 +42,12 @@ function fixture(initial=true){
  const admin=async(_:any,method:string,p:any)=>{
   calls.push({method,p,narrow:false});
   if(method==='sessions.describe')return {session:session?{...session}:null};
-  if(method==='agent'){assert.ok(calls.some(c=>c.narrow&&c.method==='sessions.patch'));assert.equal(p.expectedExistingSessionId,session.sessionId);return {runId:p.idempotencyKey};}
+  if(method==='agent'){if(submitFails)throw Error('lost acceptance');assert.ok(calls.some(c=>c.narrow&&c.method==='sessions.patch'));assert.equal(p.expectedExistingSessionId,session.sessionId);return {runId:p.idempotencyKey};}
   if(method==='agent.wait')return {runId:p.runId,status:'timeout'};
   throw Error(method);
  };
  const make=()=>new RunControl(db,admin,()=>available,()=> 'synthetic',()=>{},(_conn,row,s,settings,creation)=>prepareTaskRuntime(narrow,{sessionKey:row.sessionKey,agentId:'test',dispatchId:row.id,session:s,creation},settings));
- return {conn,calls,control:make(),make,narrow,get session(){return session;},setSession:(s:any)=>{session=s;},setHook:(fn:typeof hook)=>{hook=fn;},setAvailable:(value:boolean)=>{available=value;}};
+ return {conn,calls,control:make(),make,narrow,setPatchReceipt:(fn:typeof patchReceipt)=>{patchReceipt=fn;},setSubmitFails:()=>{submitFails=true;},get session(){return session;},setSession:(s:any)=>{session=s;},setHook:(fn:typeof hook)=>{hook=fn;},setAvailable:(value:boolean)=>{available=value;}};
 }
 const sends=(f:ReturnType<typeof fixture>)=>f.calls.filter(c=>c.method==='agent');
 const row=()=>db.prepare('SELECT * FROM task_dispatches ORDER BY seq DESC LIMIT 1').get() as any;
@@ -172,4 +175,35 @@ test('initial creation without durable handoff fails before sending create',asyn
 test('no configured runtime preparation callback cannot accidentally bypass enforcement',async()=>{
  const control=new RunControl(db,async()=>({session:{sessionId:'original',archived:false,hasActiveRun:false}}),()=>true,()=> 'synthetic');
  await control.pump({agentId:'a',openclawAgentId:'test',currentTaskId:null,currentRunId:null});assert.equal(row().state,'pending');assert.equal(row().errorCode,'runtime_preparation_failed');
+});
+
+for(const settings of [{modelOverride:null,thinkingOverride:null},{modelOverride:'test/model',thinkingOverride:null},{modelOverride:null,thinkingOverride:'high'},{modelOverride:'test/model',thinkingOverride:'high'}])for(const existing of [false,true])test('source-shaped .5 SQLite dispatch '+JSON.stringify(settings)+' existing='+existing,async()=>{
+ db.prepare('UPDATE tasks SET modelOverride=?,thinkingOverride=?').run(settings.modelOverride,settings.thinkingOverride);
+ const f=fixture(!existing,true,true);await f.control.pump(f.conn);
+ assert.equal(sends(f).length,1);assert.deepEqual(JSON.parse(row().runtimeSettings),settings);assert.equal(row().runtimeSessionRevision,'r1');
+ assert.equal(sends(f)[0].p.expectedExistingSessionLifecycleRevision,'r1');assert.equal(f.calls.filter(c=>c.method==='sessions.create').length,existing?0:1);
+});
+for(const failure of ['missing-receipt-revision','missing-describe-revision','changed-revision','missing-thinking-support','receipt-thinking-disagrees','unknown-runtime'])test('source-shaped SQLite failclosed '+failure,async()=>{
+ const f=fixture(false,true,true);f.setPatchReceipt((r,s)=>{
+  if(failure==='missing-receipt-revision')delete r.entry.lifecycleRevision;
+  if(failure==='missing-describe-revision')delete s.lifecycleRevision;
+  if(failure==='changed-revision')s.lifecycleRevision+='-changed';
+  if(failure==='missing-thinking-support')delete s.thinkingLevels;
+  if(failure==='receipt-thinking-disagrees')r.resolved.thinkingLevel='high';
+  if(failure==='unknown-runtime')r.resolved.agentRuntime={id:'future'};
+ });
+ await f.control.pump(f.conn);const before={...row()};assert.equal(sends(f).length,0);assert.equal(before.state,'pending');assert.equal(before.runId,null);assert.equal(before.attempts,0);assert.equal(before.errorCode,'runtime_preparation_failed');
+ assert.equal((db.prepare('SELECT sessionId FROM task_sessions').get() as any).sessionId,'original');
+ reopen();await f.make().pump({...f.conn,currentTaskId:null,currentRunId:null});assert.equal(sends(f).length,0);assert.equal(row().id,before.id);assert.equal(row().attempts,0);assert.equal(row().state,'pending');
+});
+for(const release of ['.3','.4'])test(release+' revisionless SQLite session cannot submit or mutate runtime',async()=>{
+ const f=fixture(false,true,true);const s={...f.session};delete s.lifecycleRevision;f.setSession(s);await f.control.pump(f.conn);const before={...row()};
+ assert.equal(sends(f).length,0);assert.equal(f.calls.filter(c=>c.method==='sessions.patch').length,0);assert.equal(before.attempts,0);assert.equal(before.state,'pending');
+ reopen();await f.make().pump({...f.conn,currentTaskId:null,currentRunId:null});assert.equal(row().id,before.id);assert.equal(sends(f).length,0);assert.equal(row().attempts,0);
+});
+test('source-shaped optional receipt never replays uncertain submission after reopen',async()=>{
+ const f=fixture(false,true,true);f.setSubmitFails();await f.control.pump(f.conn);const before={...row()};const preparations=f.calls.filter(c=>c.narrow).length;
+ assert.equal(sends(f).length,1);assert.equal(before.state,'recovery');assert.equal(before.errorCode,'acceptance_uncertain');
+ reopen();await f.make().pump({...f.conn,currentTaskId:null,currentRunId:null});
+ assert.equal(row().id,before.id);assert.equal(sends(f).length,1);assert.equal(f.calls.filter(c=>c.narrow).length,preparations);assert.equal(row().runtimeSessionRevision,'r1');
 });

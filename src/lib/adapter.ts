@@ -21,6 +21,7 @@ import { getDb } from '@/db/db';
 import { v4 as uuidv4 } from 'uuid';
 import { RunControl } from './run-control';
 import { prepareTaskRuntime, type CreationHandoff } from './runtime-control';
+import { verifyRuntimeContract } from './runtime-contract';
 import type { TaskRuntime } from './task-runtime';
 import { admitFollowup } from './run-store';
 import { logActivity } from './activity';
@@ -711,6 +712,7 @@ Instructions:
               if (result?.type !== 'hello-ok' || result.protocol !== GATEWAY_PROTOCOL_VERSION || result.auth?.role !== ROLE ||
                   !Array.isArray(result.auth.scopes) || !result.auth.scopes.includes('operator.write') ||
                   result.auth.scopes.some((scope: string) => !['operator.write', 'operator.read'].includes(scope))) throw new Error('runtime_scope_unconfirmed');
+              verifyRuntimeContract(result);
               resolve();
             }).catch(reject);
           }

@@ -16,6 +16,7 @@ All notable changes to this project are documented in this file.
 - Startup adds task_dispatches and task_sessions with CREATE TABLE IF NOT EXISTS. Existing task, comment, and activity records remain unchanged.
 
 ### Bug fixes
+- Conservative runtime preparation accepts catalog-optional patch thinking only with authoritative supported full describe proof. Requires authenticated audited .5 contract and matching nonempty lifecycle revisions; .3/.4 and incomplete metadata remain pending. Shares the existing fail-closed activity interpreter, including terminal status-only rows.
 - Initial runtime session creation durably binds the verified identity before describe/patch/readback. Failures and restart cannot adopt a replacement; unknown creation acknowledgment retains an explicit durable hold without replay or submission.
 - Issue detail keeps long descriptions and the full conversation in one accessible content scroller. Initial loads stay at the title; new comments follow only near the bottom, with deliberate jump/send scrolling. Mobile navigation reserves its safe area once and short viewports can scroll the reply form.
 - Agent API key rotation requires an authenticated human, atomically refuses pending/active/unresolved dispatch work, and reports concurrent changes or deletion instead of returning an unusable replacement. Settings retains actionable errors and one-time disclosure.
