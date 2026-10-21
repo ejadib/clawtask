@@ -10,7 +10,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts tests/*.test.tsx",
-    "test:browser": "node tests/browser/task-runtime.cjs"
+    "test:browser": "playwright test && node tests/browser/task-runtime.cjs"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
@@ -24,6 +24,7 @@
     "ws": "8.20.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@testing-library/react": "^16.3.3",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "7.6.13",
