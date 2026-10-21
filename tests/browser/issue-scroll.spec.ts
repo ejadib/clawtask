@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { scrollToBottomKey } from './scroll-to-bottom-key';
 
 const longDescription = Array.from({ length: 70 }, (_, i) => 'Paragraph ' + i + ': synthetic description with enough detail to overflow a small viewport.').join('\n\n')
   + '\n\nhttps://example.invalid/' + 'segment'.repeat(100);
@@ -90,7 +91,7 @@ for (const [width, height] of [[1440, 900], [613, 749], [390, 844], [767, 749], 
       await page.mouse.wheel(0, 450);
       await expect.poll(() => owner(page).evaluate(node => node.scrollTop)).toBeGreaterThan(0);
       await owner(page).focus();
-      await page.keyboard.press('Control+End');
+      await page.keyboard.press(scrollToBottomKey());
       await atBottom(page);
       await expect(page.getByText('Synthetic comment 44', { exact: true })).toBeInViewport();
       await expect(page.getByPlaceholder('Reply')).toBeInViewport();
