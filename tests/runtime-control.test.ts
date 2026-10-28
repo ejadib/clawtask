@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { RunControl } from '../src/lib/run-control';
 import { prepareTaskRuntime } from '../src/lib/runtime-control';
+import { verifyRuntimeContract } from '../src/lib/runtime-contract';
 import { admitFollowup } from '../src/lib/run-store';
 
 let db: Database.Database;
@@ -206,4 +207,17 @@ test('source-shaped optional receipt never replays uncertain submission after re
  assert.equal(sends(f).length,1);assert.equal(before.state,'recovery');assert.equal(before.errorCode,'acceptance_uncertain');
  reopen();await f.make().pump({...f.conn,currentTaskId:null,currentRunId:null});
  assert.equal(row().id,before.id);assert.equal(sends(f).length,1);assert.equal(f.calls.filter(c=>c.narrow).length,preparations);assert.equal(row().runtimeSessionRevision,'r1');
+});
+
+// A qualified hello is not a migration of an existing session's stored revision.
+test('upgrade from .3 to .8 retains the same revisionless legacy hold after reopen',async()=>{
+ const f=fixture(false,true,true);const original={...f.session};delete original.lifecycleRevision;f.setSession(original);
+ let version='2026.10.3';
+ f.setHook(()=>{verifyRuntimeContract({server:{version},features:{methods:['sessions.create','sessions.describe','sessions.patch','agent']}});});
+ await f.control.pump(f.conn);const before={...row()};const binding=db.prepare('SELECT * FROM task_sessions').get();
+ assert.equal(before.state,'pending');assert.equal(before.errorCode,'runtime_preparation_failed');
+ version='2026.10.8';reopen();await f.make().pump({...f.conn,currentTaskId:null,currentRunId:null});
+ assert.deepEqual({...row()},before);assert.deepEqual(db.prepare('SELECT * FROM task_sessions').get(),binding);
+ assert.deepEqual(f.session,original);assert.equal(sends(f).length,0);
+ assert.equal(f.calls.filter(c=>c.method==='sessions.patch'||c.method==='sessions.create').length,0);
 });

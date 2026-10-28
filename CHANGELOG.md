@@ -16,7 +16,7 @@ All notable changes to this project are documented in this file.
 - Startup adds task_dispatches and task_sessions with CREATE TABLE IF NOT EXISTS. Existing task, comment, and activity records remain unchanged.
 
 ### Bug fixes
-- Conservative runtime preparation accepts catalog-optional patch thinking only with authoritative supported full describe proof. Requires authenticated audited .5 contract and matching nonempty lifecycle revisions; .3/.4 and incomplete metadata remain pending. Shares the existing fail-closed activity interpreter, including terminal status-only rows.
+- Conservative runtime preparation accepts catalog-optional patch thinking only with authoritative supported full describe proof. Requires an authenticated exact audited .5/.8 contract and matching nonempty lifecycle revisions; .3/.4, unaudited releases and incomplete metadata remain pending. Shares the existing fail-closed activity interpreter, including terminal status-only rows.
 - Initial runtime session creation durably binds the verified identity before describe/patch/readback. Failures and restart cannot adopt a replacement; unknown creation acknowledgment retains an explicit durable hold without replay or submission.
 - Issue detail keeps long descriptions and the full conversation in one accessible content scroller. Initial loads stay at the title; new comments follow only near the bottom, with deliberate jump/send scrolling. Mobile navigation reserves its safe area once and short viewports can scroll the reply form.
 - Agent API key rotation requires an authenticated human, atomically refuses pending/active/unresolved dispatch work, and reports concurrent changes or deletion instead of returning an unusable replacement. Settings retains actionable errors and one-time disclosure.
@@ -32,6 +32,7 @@ All notable changes to this project are documented in this file.
 - Agent comments now use the authenticated API only. Gateway stream events no longer create or append task comments. Browser updates still use SSE.
 
 ### Tests
+- Added exact .5/.8 version/method/build boundaries, signed synthetic .8 Default/override single-submission cases and durable revisionless legacy holds. Source audit and owner-controlled rollout are documented in docs/runtime-gateway-rollout.md; these are not live-provider acceptance.
 - Moved navigation defaults into the supported tests directory and added behavioral navigation, pagination, deletion, keyboard and route-reset regressions. Local isolated-HOME suite: 124 tests passed. See docs/issue-navigation.md for limits.
 - Added 29 isolated assignment/API regressions. Reproduced the blocked → human comment → todo → reassignment failure on both assignment routes before the fix; all 75 tests now pass. See docs/blocked-reassignment-evidence.md for local gates and limits.
 - Local real-gateway checks passed for initial completion/archive, same-session followup restore/archive, browser live delivery, blocked-to-done archive, and queue sequencing. Automated checks passed on Node 26.9.0; Node 20 CI remains a separate gate.
